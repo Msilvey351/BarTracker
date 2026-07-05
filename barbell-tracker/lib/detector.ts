@@ -96,11 +96,22 @@ export function postprocess(
   const data = output.data as Float32Array;
   const numDetections = output.dims[1];
 
-  console.log(`Postprocessing ${numDetections} detections, scale=${xRatio.toFixed(3)}, pad=${padX},${padY}`);
+  // ── Find the highest scoring detection regardless of threshold ────────────
+  let maxScore = 0;
+  let maxIdx = 0;
+  for (let i = 0; i < numDetections; i++) {
+    const score = data[i * 6 + 4];
+    if (score > maxScore) {
+      maxScore = score;
+      maxIdx = i;
+    }
+  }
+  console.log(`Best detection: score=${maxScore.toFixed(4)} at index ${maxIdx}`);
+  console.log(`Best box: [${data[maxIdx*6].toFixed(1)}, ${data[maxIdx*6+1].toFixed(1)}, ${data[maxIdx*6+2].toFixed(1)}, ${data[maxIdx*6+3].toFixed(1)}]`);
+  // ─────────────────────────────────────────────────────────────────────────
 
   for (let i = 0; i < numDetections; i++) {
     const offset = i * 6;
-
     const x1    = data[offset + 0];
     const y1    = data[offset + 1];
     const x2    = data[offset + 2];
@@ -110,9 +121,6 @@ export function postprocess(
 
     if (score < 0.05) continue;
 
-    console.log(`✅ Detection ${i}: score=${score.toFixed(3)} box=[${x1.toFixed(1)}, ${y1.toFixed(1)}, ${x2.toFixed(1)}, ${y2.toFixed(1)}] label=${label}`);
-
-    // Remove padding and rescale back to original image coordinates
     const x = (x1 - padX) / xRatio;
     const y = (y1 - padY) / yRatio;
     const w = (x2 - x1) / xRatio;
