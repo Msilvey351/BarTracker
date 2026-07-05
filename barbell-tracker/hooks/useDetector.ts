@@ -60,11 +60,26 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
       // Preprocess
       const { tensor, xRatio, yRatio } = preprocessFrame(imageData, mW, mH, ort);
 
-      // Run — NMS is baked in
+      // Run model
       const results = await net.run({ images: tensor });
-      const output = results['output0'];
 
-      // Postprocess
+      // ── DEBUG — log everything the model outputs ──────────────────────────
+      console.log('=== MODEL OUTPUT DEBUG ===');
+      console.log('Output keys:', Object.keys(results));
+      for (const [key, value] of Object.entries(results)) {
+        console.log(`Key: "${key}"`);
+        console.log(`  dims:`, value.dims);
+        console.log(`  type:`, value.type);
+        console.log(`  first 12 values:`, Array.from(value.data as Float32Array).slice(0, 12));
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
+      const output = results['output0'];
+      if (!output) {
+        console.error('No output0 found! Keys were:', Object.keys(results));
+        return [];
+      }
+
       return postprocess(output, xRatio, yRatio, srcW, srcH, mW, mH);
     },
     [status, config]
