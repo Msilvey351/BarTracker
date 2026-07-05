@@ -21,9 +21,8 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
       try {
         const ort = await import('onnxruntime-web');
 
-        // Point to ALL ort files in public root
         ort.env.wasm.wasmPaths = '/';
-        ort.env.wasm.numThreads = 1; // ← add this — disables threading, avoids .jsep issues
+        ort.env.wasm.numThreads = 1;
 
         const net = await ort.InferenceSession.create(config.modelPath, {
           executionProviders: ['wasm'],
@@ -31,6 +30,11 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
         });
 
         if (cancelled) return;
+
+        // Log model metadata immediately after loading
+        console.log('✅ Model loaded!');
+        console.log('Input names:', net.inputNames);
+        console.log('Output names:', net.outputNames);
 
         netSession.current = net;
         ortRef.current = ort;
@@ -58,29 +62,29 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
       const { inputWidth: mW, inputHeight: mH } = config;
 
       // Preprocess
-      const { tensor, xRatio, yRatio } = preprocessFrame(imageData, mW, mH, ort);
+      const { tensor, xRatio, yRatio, padX, padY } = preprocessFrame(imageData, mW, mH, ort);
 
-      // Run model
-      const results = await net.run({ images: tensor });
+      // Run model using actual input name
+      const inputName = net.inputNames[0];
+      const results = await net.run({ [inputName]: tensor });
 
-      // ── DEBUG — log everything the model outputs ──────────────────────────
-      console.log('=== MODEL OUTPUT DEBUG ===');
-      console.log('Output keys:', Object.keys(results));
-      for (const [key, value] of Object.entries(results)) {
-        console.log(`Key: "${key}"`);
-        console.log(`  dims:`, value.dims);
-        console.log(`  type:`, value.type);
-        console.log(`  first 12 values:`, Array.from(value.data as Float32Array).slice(0, 12));
-      }
-      // ─────────────────────────────────────────────────────────────────────
+      // Get output using actual output name
+      const outputName = net.outputNames[0];
+      const output = results[outputName];
 
-      const output = results['output0'];
       if (!output) {
-        console.error('No output0 found! Keys were:', Object.keys(results));
+        console.error('No output found! Output names:', net.outputNames);
         return [];
       }
 
-      return postprocess(output, xRatio, yRatio, srcW, srcH, mW, mH);
+      // Only log occasionally to avoid console spam (every 30 frames)
+      if (Math.random() < 0.033) {
+        console.log(`Input: "${inputName}" Output: "${outputName}"`);
+        console.log('dims:', output.dims);
+        console.log('first 6 vals:', Array.from(output.data as Float32Array).slice(0, 6));
+      }
+
+      return postprocess(output, xRatio, yRatio, srcW, srcH, mW, mH, padX, padY);
     },
     [status, config]
   );
