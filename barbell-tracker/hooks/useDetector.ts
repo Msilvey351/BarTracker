@@ -31,7 +31,6 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
 
         if (cancelled) return;
 
-        // Log model metadata immediately after loading
         console.log('✅ Model loaded!');
         console.log('Input names:', net.inputNames);
         console.log('Output names:', net.outputNames);
@@ -64,11 +63,17 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
       // Preprocess
       const { tensor, xRatio, yRatio, padX, padY } = preprocessFrame(imageData, mW, mH, ort);
 
-      // Run model using actual input name
+      // ── Sanity check tensor values ──────────────────────────────────────────
+      const tensorData = tensor.data as Float32Array;
+      const nonZero = tensorData.filter(v => v > 0).length;
+      const maxVal = Math.max(...Array.from(tensorData.slice(0, 1000)));
+      console.log(`Tensor: ${tensorData.length} values, ${nonZero} non-zero, max=${maxVal.toFixed(3)}`);
+      // ───────────────────────────────────────────────────────────────────────
+
+      // Run model using actual input/output names
       const inputName = net.inputNames[0];
       const results = await net.run({ [inputName]: tensor });
 
-      // Get output using actual output name
       const outputName = net.outputNames[0];
       const output = results[outputName];
 
@@ -77,7 +82,7 @@ export function useDetector(config: ModelConfig = DEFAULT_CONFIG) {
         return [];
       }
 
-      // Only log occasionally to avoid console spam (every 30 frames)
+      // Log occasionally to avoid spam
       if (Math.random() < 0.033) {
         console.log(`Input: "${inputName}" Output: "${outputName}"`);
         console.log('dims:', output.dims);
