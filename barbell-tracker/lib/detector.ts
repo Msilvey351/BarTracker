@@ -28,7 +28,7 @@ export const DEFAULT_CONFIG: ModelConfig = {
   inputHeight: 416,
   topK: 10,
   iouThreshold: 0.45,
-  scoreThreshold: 0.25,
+  scoreThreshold: 0.05,
 };
 
 export function preprocessFrame(
@@ -87,9 +87,6 @@ export function postprocess(
 ): Detection[] {
   const detections: Detection[] = [];
   const data = output.data as Float32Array;
-
-  // YOLOv8 with baked NMS output shape: [1, num_detections, 6]
-  // Each detection: [x1, y1, x2, y2, score, class_id]
   const numDetections = output.dims[1];
 
   for (let i = 0; i < numDetections; i++) {
@@ -102,9 +99,11 @@ export function postprocess(
     const score = data[offset + 4];
     const label = Math.round(data[offset + 5]);
 
-    if (score < 0.25) continue;
+    if (score < 0.05) continue;  // ← lowered from 0.25
 
-    // Scale from model space back to original image space
+    // Log any detection that passes the threshold
+    console.log(`Detection: score=${score.toFixed(3)} box=[${x1.toFixed(0)}, ${y1.toFixed(0)}, ${x2.toFixed(0)}, ${y2.toFixed(0)}]`);
+
     const scaleX = srcWidth / (modelWidth / xRatio);
     const scaleY = srcHeight / (modelHeight / yRatio);
 
