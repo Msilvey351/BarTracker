@@ -13,9 +13,11 @@ export function useKinematics() {
   const [state, setState] = useState<KinematicsState>(INITIAL_STATE);
   const stateRef = useRef(INITIAL_STATE);
 
+  // Receives RAW video pixel detections — not display scaled
   const update = useCallback((detections: Detection[]) => {
     if (detections.length === 0) return;
 
+    // Use highest confidence detection
     const best = detections.reduce((a, b) => (a.score > b.score ? a : b));
 
     const next = updateKinematics(
