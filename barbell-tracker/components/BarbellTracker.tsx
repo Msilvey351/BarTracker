@@ -6,7 +6,6 @@ import { useDetectorWorker } from '@/hooks/useDetectorWorker';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
 import { DEFAULT_CONFIG } from '@/lib/detector';
-import { predictPosition } from '@/lib/kinematics';
 import type { Detection } from '@/lib/detector';
 
 type Mode = 'camera' | 'upload';
@@ -70,8 +69,8 @@ export default function BarbellTracker() {
   const loop = useCallback(() => {
     if (!isRunningRef.current) return;
 
-    const video   = videoRef.current;
-    const overlay = overlayCanvasRef.current;
+    const video     = videoRef.current;
+    const overlay   = overlayCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
     if (video && video.ended) {
@@ -88,7 +87,7 @@ export default function BarbellTracker() {
       if (ctx) {
         ctx.drawImage(video, 0, 0);
 
-        // ── Fire-and-forget inference ─────────────────────────────────────
+        // Fire-and-forget inference — never blocks the render loop
         if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
           inferenceInFlightRef.current = true;
           const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
@@ -102,9 +101,8 @@ export default function BarbellTracker() {
           });
         }
 
-        // ── Render every frame with predicted position ─────────────────────
+        // Always render at full frame rate with last known detections
         const { scale, offsetX, offsetY } = getDisplayOffset();
-        const predicted = predictPosition(kinematicsRef.current, performance.now());
 
         renderFrame(
           overlay,
@@ -116,7 +114,6 @@ export default function BarbellTracker() {
           scale,
           offsetX,
           offsetY,
-          predicted,
         );
 
         // FPS counter

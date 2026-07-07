@@ -134,34 +134,3 @@ export function resetSet(state: KinematicsState): KinematicsState {
     phase: 'idle',
   };
 }
-
-// ── Predictive tracking ───────────────────────────────────────────────────────
-// Extrapolates bar position forward in time based on recent velocity
-// Used to smooth the visual overlay while waiting for next inference result
-export function predictPosition(
-  state: KinematicsState,
-  now: number
-): { x: number; y: number } | null {
-  if (state.positions.length < 2) return null;
-
-  const last = state.positions[state.positions.length - 1];
-  const prev = state.positions[state.positions.length - 2];
-
-  const dt = last.timestamp - prev.timestamp;
-  if (dt === 0) return null;
-
-  // Velocity in pixels per millisecond
-  const vx = (last.x - prev.x) / dt;
-  const vy = (last.y - prev.y) / dt;
-
-  // How long since last detection
-  const elapsed = now - last.timestamp;
-
-  // Cap prediction at 500ms to avoid runaway extrapolation
-  const cappedElapsed = Math.min(elapsed, 500);
-
-  return {
-    x: last.x + vx * cappedElapsed,
-    y: last.y + vy * cappedElapsed,
-  };
-}

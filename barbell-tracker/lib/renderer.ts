@@ -31,7 +31,6 @@ export function renderFrame(
   scale: number = 1,
   offsetX: number = 0,
   offsetY: number = 0,
-  predicted?: { x: number; y: number } | null,
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -64,29 +63,6 @@ export function renderFrame(
 
   if (options.showBarPath) drawBarPath(ctx, scaledKinematics);
   if (options.showDetectionBox) drawDetections(ctx, scaledDetections, kinematics.phase);
-
-  // Draw predicted position ghost dot
-  if (predicted && options.showBarPath) {
-    const px = predicted.x * scale + offsetX;
-    const py = predicted.y * scale + offsetY;
-
-    ctx.save();
-    // Outer glow ring
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = '#22c55e';
-    ctx.beginPath();
-    ctx.arc(px, py, 16, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Inner dot
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = '#22c55e';
-    ctx.beginPath();
-    ctx.arc(px, py, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-
   if (options.showHUD) drawHUD(ctx, kinematics, canvas.width, canvas.height);
   if (options.showCalibrationStatus) drawCalibrationBadge(ctx, kinematics);
 }
