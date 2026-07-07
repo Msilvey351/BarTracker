@@ -39,42 +39,43 @@ export function preprocessFrame(
 ): { tensor: TensorType; xRatio: number; yRatio: number; padX: number; padY: number } {
   const { width: srcW, height: srcH } = imageData;
 
-  // ── Letterbox: scale to fit inside modelWidth×modelHeight with black padding ──
+  // Scale to fit inside model dimensions preserving aspect ratio
   const scale = Math.min(modelWidth / srcW, modelHeight / srcH);
   const scaledW = Math.round(srcW * scale);
   const scaledH = Math.round(srcH * scale);
 
-  // Padding to centre the image (black edges)
-  const padX = Math.floor((modelWidth - scaledW) / 2);
+  // Centre padding — this is what shifts detections
+  const padX = Math.floor((modelWidth  - scaledW) / 2);
   const padY = Math.floor((modelHeight - scaledH) / 2);
 
-  // Draw onto letterboxed canvas
+  if (Math.random() < 0.02) {
+    console.log(`Preprocess: src=${srcW}x${srcH} scale=${scale.toFixed(3)} scaled=${scaledW}x${scaledH} pad=${padX},${padY}`);
+  }
+
+  // Draw letterboxed image
   const canvas = document.createElement('canvas');
   canvas.width = modelWidth;
   canvas.height = modelHeight;
   const ctx = canvas.getContext('2d')!;
-
-  // Fill black
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, modelWidth, modelHeight);
 
-  // Draw source image scaled + centred
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = srcW;
   srcCanvas.height = srcH;
   srcCanvas.getContext('2d')!.putImageData(imageData, 0, 0);
+
+  // Draw centred
   ctx.drawImage(srcCanvas, padX, padY, scaledW, scaledH);
 
   const resized = ctx.getImageData(0, 0, modelWidth, modelHeight);
 
-  // ── Convert to float32 CHW RGB normalised 0-1 ─────────────────────────────
+  // Convert to float32 CHW RGB
   const float32 = new Float32Array(3 * modelWidth * modelHeight);
-  const pixels = resized.data;
-
   for (let i = 0; i < modelWidth * modelHeight; i++) {
-    float32[i] = pixels[i * 4] / 255.0;                          // R
-    float32[modelWidth * modelHeight + i] = pixels[i * 4 + 1] / 255.0;     // G
-    float32[2 * modelWidth * modelHeight + i] = pixels[i * 4 + 2] / 255.0; // B
+    float32[i]                            = resized.data[i * 4]     / 255.0; // R
+    float32[modelWidth * modelHeight + i] = resized.data[i * 4 + 1] / 255.0; // G
+    float32[2 * modelWidth * modelHeight + i] = resized.data[i * 4 + 2] / 255.0; // B
   }
 
   const tensor = new ort.Tensor('float32', float32, [1, 3, modelHeight, modelWidth]);
@@ -96,22 +97,19 @@ export function postprocess(
   const data = output.data as Float32Array;
   const numDetections = output.dims[1];
 
-  // ── Find the highest scoring detection regardless of threshold ────────────
+  // Find best detection for debug
   let maxScore = 0;
-  let maxIdx = 0;
   for (let i = 0; i < numDetections; i++) {
     const score = data[i * 6 + 4];
-    if (score > maxScore) {
-      maxScore = score;
-      maxIdx = i;
-    }
+    if (score > maxScore) maxScore = score;
   }
-  console.log(`Best detection: score=${maxScore.toFixed(4)} at index ${maxIdx}`);
-  console.log(`Best box: [${data[maxIdx*6].toFixed(1)}, ${data[maxIdx*6+1].toFixed(1)}, ${data[maxIdx*6+2].toFixed(1)}, ${data[maxIdx*6+3].toFixed(1)}]`);
-  // ─────────────────────────────────────────────────────────────────────────
+  if (Math.random() < 0.05) {
+    console.log(`Best score: ${maxScore.toFixed(3)} | scale: ${xRatio.toFixed(3)} | pad: ${padX},${padY} | src: ${srcWidth}x${srcHeight}`);
+  }
 
   for (let i = 0; i < numDetections; i++) {
     const offset = i * 6;
+
     const x1    = data[offset + 0];
     const y1    = data[offset + 1];
     const x2    = data[offset + 2];
@@ -121,18 +119,29 @@ export function postprocess(
 
     if (score < 0.05) continue;
 
+    // ── Correct coordinate mapping ─────────────────────────────────────────
+    // 1. Remove padding offset (centres the image in model space)
+    // 2. Divide by scale to get back to original image pixels
     const x = (x1 - padX) / xRatio;
     const y = (y1 - padY) / yRatio;
     const w = (x2 - x1) / xRatio;
     const h = (y2 - y1) / yRatio;
 
+    // Clamp to image bounds
+    const cx = Math.max(0, Math.min(srcWidth, x));
+    const cy = Math.max(0, Math.min(srcHeight, y));
+    const cw = Math.max(0, Math.min(srcWidth - cx, w));
+    const ch = Math.max(0, Math.min(srcHeight - cy, h));
+
+    if (cw < 5 || ch < 5) continue; // skip tiny detections
+
     detections.push({
-      x: Math.max(0, x),
-      y: Math.max(0, y),
-      width: Math.max(0, w),
-      height: Math.max(0, h),
-      centerX: Math.max(0, x) + Math.max(0, w) / 2,
-      centerY: Math.max(0, y) + Math.max(0, h) / 2,
+      x: cx,
+      y: cy,
+      width: cw,
+      height: ch,
+      centerX: cx + cw / 2,
+      centerY: cy + ch / 2,
       score,
       label,
     });
