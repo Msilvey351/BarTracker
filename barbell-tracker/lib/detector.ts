@@ -24,8 +24,8 @@ export interface ModelConfig {
 export const DEFAULT_CONFIG: ModelConfig = {
   modelPath: '/models/barbell.onnx',
   nmsPath: '',
-  inputWidth: 416,
-  inputHeight: 416,
+  inputWidth: 640,
+  inputHeight: 640,
   topK: 10,
   iouThreshold: 0.45,
   scoreThreshold: 0.05,
