@@ -2,7 +2,7 @@
 
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { useWebcam } from '@/hooks/useWebcam';
-import { useDetector } from '@/hooks/useDetector';
+import { useDetectorWorker as useDetector } from '@/hooks/useDetectorWorker';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
 import { DEFAULT_CONFIG } from '@/lib/detector';
