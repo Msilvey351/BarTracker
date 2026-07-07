@@ -23,22 +23,46 @@ export const DEFAULT_RENDER_OPTIONS: RenderOptions = {
 
 export function renderFrame(
   canvas: HTMLCanvasElement,
-  videoWidth: number,
-  videoHeight: number,
+  displayW: number,
+  displayH: number,
   detections: Detection[],
   kinematics: KinematicsState,
-  options: RenderOptions = DEFAULT_RENDER_OPTIONS
+  options: RenderOptions = DEFAULT_RENDER_OPTIONS,
+  scale: number = 1,
+  offsetX: number = 0,
+  offsetY: number = 0,
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  if (canvas.width !== videoWidth) canvas.width = videoWidth;
-  if (canvas.height !== videoHeight) canvas.height = videoHeight;
+  if (canvas.width !== displayW) canvas.width = displayW;
+  if (canvas.height !== displayH) canvas.height = displayH;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (options.showBarPath) drawBarPath(ctx, kinematics);
-  if (options.showDetectionBox) drawDetections(ctx, detections, kinematics.phase);
+  // Scale detections to display coordinates
+  const scaledDetections = detections.map(d => ({
+    ...d,
+    x:       d.x       * scale + offsetX,
+    y:       d.y       * scale + offsetY,
+    width:   d.width   * scale,
+    height:  d.height  * scale,
+    centerX: d.centerX * scale + offsetX,
+    centerY: d.centerY * scale + offsetY,
+  }));
+
+  // Scale bar path to display coordinates
+  const scaledKinematics = {
+    ...kinematics,
+    barPath: kinematics.barPath.map(p => ({
+      ...p,
+      x: p.x * scale + offsetX,
+      y: p.y * scale + offsetY,
+    })),
+  };
+
+  if (options.showBarPath) drawBarPath(ctx, scaledKinematics);
+  if (options.showDetectionBox) drawDetections(ctx, scaledDetections, kinematics.phase);
   if (options.showHUD) drawHUD(ctx, kinematics, canvas.width, canvas.height);
   if (options.showCalibrationStatus) drawCalibrationBadge(ctx, kinematics);
 }
@@ -86,12 +110,10 @@ function drawDetections(
 
     ctx.save();
 
-    // Bounding box
     ctx.strokeStyle = '#facc15';
     ctx.lineWidth = 2;
     ctx.strokeRect(x, y, width, height);
 
-    // Corner accents
     ctx.strokeStyle = phaseColour;
     ctx.lineWidth = 3;
     const cLen = Math.min(width, height) * 0.2;
@@ -100,7 +122,6 @@ function drawDetections(
     ctx.beginPath(); ctx.moveTo(x + width, y + height - cLen); ctx.lineTo(x + width, y + height); ctx.lineTo(x + width - cLen, y + height); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x + cLen, y + height); ctx.lineTo(x, y + height); ctx.lineTo(x, y + height - cLen); ctx.stroke();
 
-    // Score label
     ctx.fillStyle = '#facc15';
     ctx.font = 'bold 12px monospace';
     ctx.fillText(`${(score * 100).toFixed(0)}%`, x + 4, y - 5);
@@ -138,16 +159,14 @@ function drawHUD(
   ctx.font = 'bold 28px monospace';
   ctx.fillText(
     k.pixelsPerMetre ? `${k.velocity.toFixed(2)} m/s` : '-- m/s',
-    panelX + pad,
-    panelY + 56
+    panelX + pad, panelY + 56
   );
 
   ctx.fillStyle = '#94a3b8';
   ctx.font = '11px monospace';
   ctx.fillText(
     `PEAK: ${k.pixelsPerMetre ? k.peakVelocity.toFixed(2) : '--'} m/s`,
-    panelX + pad,
-    panelY + 76
+    panelX + pad, panelY + 76
   );
 
   ctx.fillStyle = '#e2e8f0';
@@ -163,7 +182,6 @@ function drawHUD(
 
 function drawCalibrationBadge(ctx: CanvasRenderingContext2D, k: KinematicsState) {
   const calibrated = !!k.pixelsPerMetre;
-
   ctx.save();
   ctx.globalAlpha = 0.85;
   ctx.fillStyle = calibrated ? '#15803d' : '#92400e';
@@ -174,11 +192,8 @@ function drawCalibrationBadge(ctx: CanvasRenderingContext2D, k: KinematicsState)
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 11px monospace';
   ctx.fillText(
-    calibrated
-      ? `✓ CAL ${k.pixelsPerMetre!.toFixed(0)}px/m`
-      : '⚠ AWAITING CALIBRATION',
-    20,
-    30
+    calibrated ? `✓ CAL ${k.pixelsPerMetre!.toFixed(0)}px/m` : '⚠ AWAITING CALIBRATION',
+    20, 30
   );
   ctx.restore();
 }

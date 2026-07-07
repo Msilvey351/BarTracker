@@ -43,6 +43,31 @@ export default function BarbellTracker() {
     offscreenCanvasRef.current = document.createElement('canvas');
   }, []);
 
+  // ── Calculate display offset (for object-contain letterboxing) ────────────
+  const getDisplayOffset = useCallback(() => {
+    const video = videoRef.current;
+    const overlay = overlayCanvasRef.current;
+    if (!video || !overlay) return { scale: 1, offsetX: 0, offsetY: 0 };
+
+    const displayW = overlay.clientWidth;
+    const displayH = overlay.clientHeight;
+    const videoW = video.videoWidth;
+    const videoH = video.videoHeight;
+
+    if (!videoW || !videoH) return { scale: 1, offsetX: 0, offsetY: 0 };
+
+    // object-contain scaling
+    const scale = Math.min(displayW / videoW, displayH / videoH);
+    const renderedW = videoW * scale;
+    const renderedH = videoH * scale;
+
+    // Black bar offsets
+    const offsetX = (displayW - renderedW) / 2;
+    const offsetY = (displayH - renderedH) / 2;
+
+    return { scale, offsetX, offsetY };
+  }, []);
+
   // ── Animation loop ────────────────────────────────────────────────────────
   const loop = useCallback(async () => {
     if (!isRunningRef.current) return;
@@ -51,7 +76,6 @@ export default function BarbellTracker() {
     const overlay = overlayCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
-    // Stop loop when uploaded video ends
     if (video && video.ended) {
       isRunningRef.current = false;
       setIsTracking(false);
@@ -62,6 +86,7 @@ export default function BarbellTracker() {
       offscreen.width = video.videoWidth;
       offscreen.height = video.videoHeight;
       const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+
       if (ctx) {
         ctx.drawImage(video, 0, 0);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
@@ -69,13 +94,19 @@ export default function BarbellTracker() {
         const detections = await detectorRef.current.detect(imageData);
         updateKinematicsRef.current(detections);
 
+        // Get display offset to correctly position overlay
+        const { scale, offsetX, offsetY } = getDisplayOffset();
+
         renderFrame(
           overlay,
-          video.videoWidth,
-          video.videoHeight,
+          overlay.clientWidth,
+          overlay.clientHeight,
           detections,
           kinematicsRef.current,
-          DEFAULT_RENDER_OPTIONS
+          DEFAULT_RENDER_OPTIONS,
+          scale,
+          offsetX,
+          offsetY,
         );
 
         fpsRef.current.frames++;
@@ -88,7 +119,7 @@ export default function BarbellTracker() {
     }
 
     animFrameRef.current = requestAnimationFrame(loop);
-  }, []);
+  }, [getDisplayOffset]);
 
   // ── Camera mode ───────────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
@@ -109,7 +140,6 @@ export default function BarbellTracker() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Revoke previous URL
     if (uploadedVideo) URL.revokeObjectURL(uploadedVideo);
 
     const url = URL.createObjectURL(file);
@@ -126,11 +156,9 @@ export default function BarbellTracker() {
   const startVideoAnalysis = useCallback(() => {
     const video = videoRef.current;
     if (!video || !videoReady) return;
-
     video.currentTime = 0;
     video.playbackRate = playbackSpeed;
     video.play();
-
     isRunningRef.current = true;
     setIsTracking(true);
     animFrameRef.current = requestAnimationFrame(loop);
@@ -145,27 +173,19 @@ export default function BarbellTracker() {
 
   // ── Mode switching ────────────────────────────────────────────────────────
   const switchMode = useCallback((newMode: Mode) => {
-    // Stop everything first
     isRunningRef.current = false;
     cancelAnimationFrame(animFrameRef.current);
     setIsTracking(false);
-
-    if (newMode === 'camera') {
-      webcamRef.current.stop();
-      if (videoRef.current) {
-        videoRef.current.src = '';
-        videoRef.current.srcObject = null;
-      }
-    } else {
-      webcamRef.current.stop();
+    webcamRef.current.stop();
+    if (videoRef.current) {
+      videoRef.current.src = '';
+      videoRef.current.srcObject = null;
     }
-
     resetKinematics();
     setMode(newMode);
     setVideoReady(false);
   }, [resetKinematics]);
 
-  // ── Playback speed ────────────────────────────────────────────────────────
   const handleSpeedChange = useCallback((speed: number) => {
     setPlaybackSpeed(speed);
     if (videoRef.current) videoRef.current.playbackRate = speed;
@@ -226,7 +246,6 @@ export default function BarbellTracker() {
           className="absolute inset-0 w-full h-full"
           style={{ pointerEvents: 'none' }}
         />
-        {/* Empty state */}
         {!webcam.isReady && !uploadedVideo && (
           <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
             {mode === 'camera' ? 'Camera not started' : 'No video uploaded'}
@@ -234,7 +253,7 @@ export default function BarbellTracker() {
         )}
       </div>
 
-      {/* ── Camera controls ── */}
+      {/* Camera controls */}
       {mode === 'camera' && (
         <div className="flex gap-3 flex-wrap justify-center">
           <button
@@ -259,11 +278,9 @@ export default function BarbellTracker() {
         </div>
       )}
 
-      {/* ── Upload controls ── */}
+      {/* Upload controls */}
       {mode === 'upload' && (
         <div className="flex flex-col items-center gap-3 w-full max-w-xl">
-
-          {/* File picker */}
           <label className="w-full cursor-pointer">
             <div className="border-2 border-dashed border-slate-600 hover:border-blue-500
               rounded-xl p-6 text-center transition-colors">
@@ -281,7 +298,6 @@ export default function BarbellTracker() {
             />
           </label>
 
-          {/* Playback speed */}
           {uploadedVideo && (
             <div className="flex items-center gap-2 text-sm">
               <span className="text-slate-400">Speed:</span>
@@ -301,7 +317,6 @@ export default function BarbellTracker() {
             </div>
           )}
 
-          {/* Play/pause + reset */}
           {uploadedVideo && (
             <div className="flex gap-3">
               <button
@@ -313,9 +328,7 @@ export default function BarbellTracker() {
                     : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
                   }`}
               >
-                {!videoReady
-                  ? 'Loading video...'
-                  : isTracking ? '⏸ Pause' : '▶ Analyse Video'}
+                {!videoReady ? 'Loading video...' : isTracking ? '⏸ Pause' : '▶ Analyse Video'}
               </button>
               <button
                 onClick={resetKinematics}
@@ -343,7 +356,6 @@ export default function BarbellTracker() {
         <StatCard label="Phase" value={kinematics.phase.toUpperCase()} />
       </div>
 
-      {/* Errors */}
       {(webcam.error || detector.error) && (
         <div className="text-red-400 text-sm bg-red-950 px-4 py-2 rounded-lg">
           {webcam.error || detector.error}
