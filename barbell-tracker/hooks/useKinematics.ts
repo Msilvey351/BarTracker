@@ -17,8 +17,8 @@ export function useKinematics() {
   const update = useCallback((detections: Detection[]) => {
     if (detections.length === 0) return;
 
-    // Use highest confidence detection
-    const best = detections.reduce((a, b) => (a.score > b.score ? a : b));
+    // detections are already sorted by score after NMS — use first (best)
+    const best = detections[0];
 
     const next = updateKinematics(
       stateRef.current,

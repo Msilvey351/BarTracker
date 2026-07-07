@@ -6,6 +6,7 @@ import { useDetector } from '@/hooks/useDetector';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
 import { DEFAULT_CONFIG } from '@/lib/detector';
+import type { Detection } from '@/lib/detector';
 
 type Mode = 'camera' | 'upload';
 
@@ -15,6 +16,8 @@ export default function BarbellTracker() {
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number>(0);
   const isRunningRef = useRef(false);
+  const frameCountRef = useRef(0);
+  const lastDetectionsRef = useRef<Detection[]>([]);
 
   const webcam = useWebcam(videoRef);
   const detector = useDetector(DEFAULT_CONFIG);
@@ -43,7 +46,7 @@ export default function BarbellTracker() {
     offscreenCanvasRef.current = document.createElement('canvas');
   }, []);
 
-  // ── Calculate display offset (for object-contain letterboxing) ────────────
+  // ── Calculate display offset ──────────────────────────────────────────────
   const getDisplayOffset = useCallback(() => {
     const video = videoRef.current;
     const overlay = overlayCanvasRef.current;
@@ -53,17 +56,11 @@ export default function BarbellTracker() {
     const displayH = overlay.clientHeight;
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
-
     if (!videoW || !videoH) return { scale: 1, offsetX: 0, offsetY: 0 };
 
-    // object-contain scaling
     const scale = Math.min(displayW / videoW, displayH / videoH);
-    const renderedW = videoW * scale;
-    const renderedH = videoH * scale;
-
-    // Black bar offsets
-    const offsetX = (displayW - renderedW) / 2;
-    const offsetY = (displayH - renderedH) / 2;
+    const offsetX = (displayW - videoW * scale) / 2;
+    const offsetY = (displayH - videoH * scale) / 2;
 
     return { scale, offsetX, offsetY };
   }, []);
@@ -89,12 +86,20 @@ export default function BarbellTracker() {
 
       if (ctx) {
         ctx.drawImage(video, 0, 0);
-        const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+        frameCountRef.current++;
 
-        const detections = await detectorRef.current.detect(imageData);
+        // Only run inference every 2nd frame for speed
+        let detections = lastDetectionsRef.current;
+        if (frameCountRef.current % 2 === 0) {
+          const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
+          detections = await detectorRef.current.detect(imageData);
+          lastDetectionsRef.current = detections;
+        }
+
+        // Pass raw video pixel detections to kinematics
         updateKinematicsRef.current(detections);
 
-        // Get display offset to correctly position overlay
+        // Get display offset and render
         const { scale, offsetX, offsetY } = getDisplayOffset();
 
         renderFrame(
@@ -124,6 +129,8 @@ export default function BarbellTracker() {
   // ── Camera mode ───────────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
     if (!webcamRef.current.isReady) await webcamRef.current.start();
+    frameCountRef.current = 0;
+    lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
     animFrameRef.current = requestAnimationFrame(loop);
@@ -139,14 +146,11 @@ export default function BarbellTracker() {
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     if (uploadedVideo) URL.revokeObjectURL(uploadedVideo);
-
     const url = URL.createObjectURL(file);
     setUploadedVideo(url);
     setVideoReady(false);
     resetKinematics();
-
     if (videoRef.current) {
       videoRef.current.src = url;
       videoRef.current.load();
@@ -159,6 +163,8 @@ export default function BarbellTracker() {
     video.currentTime = 0;
     video.playbackRate = playbackSpeed;
     video.play();
+    frameCountRef.current = 0;
+    lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
     animFrameRef.current = requestAnimationFrame(loop);
@@ -184,6 +190,8 @@ export default function BarbellTracker() {
     resetKinematics();
     setMode(newMode);
     setVideoReady(false);
+    frameCountRef.current = 0;
+    lastDetectionsRef.current = [];
   }, [resetKinematics]);
 
   const handleSpeedChange = useCallback((speed: number) => {

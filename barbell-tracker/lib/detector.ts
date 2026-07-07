@@ -26,9 +26,9 @@ export const DEFAULT_CONFIG: ModelConfig = {
   nmsPath: '',
   inputWidth: 640,
   inputHeight: 640,
-  topK: 10,
+  topK: 1,              // ← only keep the single best detection
   iouThreshold: 0.45,
-  scoreThreshold: 0.25,
+  scoreThreshold: 0.45, // ← raise from 0.25 to 0.45
 };
 
 export function preprocessFrame(
