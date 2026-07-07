@@ -12,8 +12,6 @@ export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
 
   const workerRef = useRef<Worker | null>(null);
   const ortRef = useRef<typeof import('onnxruntime-web') | null>(null);
-
-  // Pending detection resolver
   const pendingRef = useRef<((d: Detection[]) => void) | null>(null);
 
   useEffect(() => {
@@ -22,11 +20,9 @@ export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
     async function init() {
       setStatus('loading');
       try {
-        // Load ort just for preprocessing (tensor creation)
         const ort = await import('onnxruntime-web');
         ortRef.current = ort;
 
-        // Create worker
         const worker = new Worker(
           new URL('../workers/detector.worker.ts', import.meta.url),
           { type: 'module' }
@@ -34,18 +30,15 @@ export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
 
         worker.onmessage = (e) => {
           const { type, payload } = e.data;
-
           if (type === 'ready') {
             if (!cancelled) setStatus('ready');
           }
-
           if (type === 'result') {
             if (pendingRef.current) {
               pendingRef.current(payload as Detection[]);
               pendingRef.current = null;
             }
           }
-
           if (type === 'error') {
             console.error('Worker error:', payload);
             if (!cancelled) {
@@ -64,8 +57,6 @@ export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
         };
 
         workerRef.current = worker;
-
-        // Tell worker to load the model
         worker.postMessage({
           type: 'load',
           payload: { modelPath: config.modelPath }
@@ -98,28 +89,32 @@ export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
       const { inputWidth: mW, inputHeight: mH } = config;
       const { width: srcW, height: srcH } = imageData;
 
-      // Preprocess on main thread
       const { tensor, xRatio, padX, padY } = preprocessFrame(imageData, mW, mH, ort);
 
-      // Send to worker — transfer the buffer for zero-copy
+      // ── Zero-copy transfer to worker ──────────────────────────────────────
+      const float32 = new Float32Array(tensor.data as Float32Array);
+
       return new Promise((resolve) => {
         pendingRef.current = resolve;
 
-        worker.postMessage({
-          type: 'detect',
-          payload: {
-            float32: Array.from(tensor.data as Float32Array),
-            shape: tensor.dims,
-            srcWidth: srcW,
-            srcHeight: srcH,
-            padX,
-            padY,
-            scale: xRatio,
-            scoreThreshold: config.scoreThreshold,
-            iouThreshold: config.iouThreshold,
-            topK: config.topK,
-          }
-        });
+        worker.postMessage(
+          {
+            type: 'detect',
+            payload: {
+              float32,
+              shape: tensor.dims,
+              srcWidth: srcW,
+              srcHeight: srcH,
+              padX,
+              padY,
+              scale: xRatio,
+              scoreThreshold: config.scoreThreshold,
+              iouThreshold: config.iouThreshold,
+              topK: config.topK,
+            }
+          },
+          [float32.buffer] // ← transfer ownership, zero copy
+        );
       });
     },
     [status, config]

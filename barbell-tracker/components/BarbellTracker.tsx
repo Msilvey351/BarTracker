@@ -2,10 +2,11 @@
 
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { useWebcam } from '@/hooks/useWebcam';
-import { useDetectorWorker as useDetector } from '@/hooks/useDetectorWorker';
+import { useDetectorWorker } from '@/hooks/useDetectorWorker';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
 import { DEFAULT_CONFIG } from '@/lib/detector';
+import { predictPosition } from '@/lib/kinematics';
 import type { Detection } from '@/lib/detector';
 
 type Mode = 'camera' | 'upload';
@@ -16,11 +17,11 @@ export default function BarbellTracker() {
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number>(0);
   const isRunningRef = useRef(false);
-  const frameCountRef = useRef(0);
+  const inferenceInFlightRef = useRef(false);
   const lastDetectionsRef = useRef<Detection[]>([]);
 
   const webcam = useWebcam(videoRef);
-  const detector = useDetector(DEFAULT_CONFIG);
+  const detector = useDetectorWorker(DEFAULT_CONFIG);
   const { kinematics, update: updateKinematics, reset: resetKinematics } = useKinematics();
 
   const [mode, setMode] = useState<Mode>('camera');
@@ -46,7 +47,7 @@ export default function BarbellTracker() {
     offscreenCanvasRef.current = document.createElement('canvas');
   }, []);
 
-  // ── Calculate display offset ──────────────────────────────────────────────
+  // ── Display offset ────────────────────────────────────────────────────────
   const getDisplayOffset = useCallback(() => {
     const video = videoRef.current;
     const overlay = overlayCanvasRef.current;
@@ -58,7 +59,7 @@ export default function BarbellTracker() {
     const videoH = video.videoHeight;
     if (!videoW || !videoH) return { scale: 1, offsetX: 0, offsetY: 0 };
 
-    const scale = Math.min(displayW / videoW, displayH / videoH);
+    const scale   = Math.min(displayW / videoW, displayH / videoH);
     const offsetX = (displayW - videoW * scale) / 2;
     const offsetY = (displayH - videoH * scale) / 2;
 
@@ -66,10 +67,10 @@ export default function BarbellTracker() {
   }, []);
 
   // ── Animation loop ────────────────────────────────────────────────────────
-  const loop = useCallback(async () => {
+  const loop = useCallback(() => {
     if (!isRunningRef.current) return;
 
-    const video = videoRef.current;
+    const video   = videoRef.current;
     const overlay = overlayCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
@@ -80,40 +81,45 @@ export default function BarbellTracker() {
     }
 
     if (video && overlay && offscreen && !video.paused) {
-      offscreen.width = video.videoWidth;
+      offscreen.width  = video.videoWidth;
       offscreen.height = video.videoHeight;
       const ctx = offscreen.getContext('2d', { willReadFrequently: true });
 
       if (ctx) {
         ctx.drawImage(video, 0, 0);
-        frameCountRef.current++;
 
-        // Only run inference every 2nd frame for speed
-        let detections = lastDetectionsRef.current;
-        if (frameCountRef.current % 2 === 0) {
+        // ── Fire-and-forget inference ─────────────────────────────────────
+        if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
+          inferenceInFlightRef.current = true;
           const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
-          detections = await detectorRef.current.detect(imageData);
-          lastDetectionsRef.current = detections;
+
+          detectorRef.current.detect(imageData).then((result) => {
+            if (result.length > 0) {
+              lastDetectionsRef.current = result;
+              updateKinematicsRef.current(result);
+            }
+            inferenceInFlightRef.current = false;
+          });
         }
 
-        // Pass raw video pixel detections to kinematics
-        updateKinematicsRef.current(detections);
-
-        // Get display offset and render
+        // ── Render every frame with predicted position ─────────────────────
         const { scale, offsetX, offsetY } = getDisplayOffset();
+        const predicted = predictPosition(kinematicsRef.current, performance.now());
 
         renderFrame(
           overlay,
           overlay.clientWidth,
           overlay.clientHeight,
-          detections,
+          lastDetectionsRef.current,
           kinematicsRef.current,
           DEFAULT_RENDER_OPTIONS,
           scale,
           offsetX,
           offsetY,
+          predicted,
         );
 
+        // FPS counter
         fpsRef.current.frames++;
         const now = performance.now();
         if (now - fpsRef.current.last > 1000) {
@@ -126,10 +132,10 @@ export default function BarbellTracker() {
     animFrameRef.current = requestAnimationFrame(loop);
   }, [getDisplayOffset]);
 
-  // ── Camera mode ───────────────────────────────────────────────────────────
+  // ── Camera controls ───────────────────────────────────────────────────────
   const startCamera = useCallback(async () => {
     if (!webcamRef.current.isReady) await webcamRef.current.start();
-    frameCountRef.current = 0;
+    inferenceInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -142,7 +148,7 @@ export default function BarbellTracker() {
     setIsTracking(false);
   }, []);
 
-  // ── Upload mode ───────────────────────────────────────────────────────────
+  // ── Upload controls ───────────────────────────────────────────────────────
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -163,7 +169,7 @@ export default function BarbellTracker() {
     video.currentTime = 0;
     video.playbackRate = playbackSpeed;
     video.play();
-    frameCountRef.current = 0;
+    inferenceInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -190,7 +196,7 @@ export default function BarbellTracker() {
     resetKinematics();
     setMode(newMode);
     setVideoReady(false);
-    frameCountRef.current = 0;
+    inferenceInFlightRef.current = false;
     lastDetectionsRef.current = [];
   }, [resetKinematics]);
 
@@ -212,7 +218,7 @@ export default function BarbellTracker() {
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
       <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
 
-      {/* Status badges */}
+      {/* Status */}
       <div className="flex gap-3 text-sm flex-wrap justify-center">
         <StatusBadge label="Model" value={detector.status} ok={detector.status === 'ready'} />
         <StatusBadge label="Camera" value={webcam.isReady ? 'ready' : 'off'} ok={webcam.isReady} />
@@ -237,7 +243,7 @@ export default function BarbellTracker() {
         </button>
       </div>
 
-      {/* Video area */}
+      {/* Video */}
       <div
         className="relative rounded-xl overflow-hidden border border-slate-700 bg-black w-full"
         style={{ maxWidth: 720, aspectRatio: '16/9' }}

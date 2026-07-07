@@ -1,7 +1,7 @@
 import * as ort from 'onnxruntime-web';
 
 let session: ort.InferenceSession | null = null;
-let inputName = 'images';
+let inputName  = 'images';
 let outputName = 'output0';
 
 function sigmoid(x: number): number {
@@ -19,15 +19,8 @@ function iou(a: number[], b: number[]): number {
   return intersection / (aArea + bArea - intersection);
 }
 
-function nms(
-  boxes: number[][],
-  scores: number[],
-  iouThreshold: number
-): number[] {
-  const indices = scores
-    .map((s, i) => i)
-    .sort((a, b) => scores[b] - scores[a]);
-
+function nms(boxes: number[][], scores: number[], iouThreshold: number): number[] {
+  const indices = scores.map((_, i) => i).sort((a, b) => scores[b] - scores[a]);
   const kept: number[] = [];
   const suppressed = new Set<number>();
 
@@ -36,9 +29,7 @@ function nms(
     kept.push(i);
     for (const j of indices) {
       if (i === j || suppressed.has(j)) continue;
-      if (iou(boxes[i], boxes[j]) > iouThreshold) {
-        suppressed.add(j);
-      }
+      if (iou(boxes[i], boxes[j]) > iouThreshold) suppressed.add(j);
     }
   }
   return kept;
@@ -74,20 +65,13 @@ self.onmessage = async (e) => {
   if (type === 'detect' && session) {
     try {
       const {
-        float32,
-        shape,
-        srcWidth,
-        srcHeight,
-        padX,
-        padY,
-        scale,
-        scoreThreshold,
-        iouThreshold,
-        topK,
+        float32, shape,
+        srcWidth, srcHeight,
+        padX, padY, scale,
+        scoreThreshold, iouThreshold, topK,
       } = payload;
 
-      // Run inference
-      const tensor = new ort.Tensor('float32', new Float32Array(float32), shape);
+      const tensor  = new ort.Tensor('float32', float32, shape);
       const results = await session.run({ [inputName]: tensor });
       const output  = results[outputName];
       const data    = output.data as Float32Array;
@@ -100,12 +84,12 @@ self.onmessage = async (e) => {
         score: number; label: number;
       }> = [];
 
-      // ── Parse raw YOLOv8 output [1, 5, 8400] ─────────────────────────────
+      // ── Raw YOLOv8 [1, 5, 8400] ──────────────────────────────────────────
       if (dims.length === 3 && dims[1] < dims[2]) {
         const numAnchors = dims[2];
         const numAttribs = dims[1];
-        const boxes: number[][] = [];
-        const scores: number[] = [];
+        const boxes:  number[][] = [];
+        const scores: number[]   = [];
 
         for (let i = 0; i < numAnchors; i++) {
           const cx = data[0 * numAnchors + i];
@@ -128,8 +112,6 @@ self.onmessage = async (e) => {
           const bw = w / scale;
           const bh = h / scale;
 
-          const cx2 = Math.max(0, Math.min(srcWidth,  x + bw / 2));
-          const cy2 = Math.max(0, Math.min(srcHeight, y + bh / 2));
           const clampedX = Math.max(0, x);
           const clampedY = Math.max(0, y);
           const clampedW = Math.max(0, Math.min(srcWidth  - clampedX, bw));
@@ -142,19 +124,18 @@ self.onmessage = async (e) => {
           detections.push({
             x: clampedX, y: clampedY,
             width: clampedW, height: clampedH,
-            centerX: cx2, centerY: cy2,
+            centerX: clampedX + clampedW / 2,
+            centerY: clampedY + clampedH / 2,
             score, label: maxClass,
           });
         }
 
-        // Apply NMS
-        const kept = nms(boxes, scores, iouThreshold).slice(0, topK);
+        const kept  = nms(boxes, scores, iouThreshold).slice(0, topK);
         const final = kept.map(i => detections[i]);
-
         self.postMessage({ type: 'result', payload: final });
       }
 
-      // ── Parse baked NMS output [1, 300, 6] ───────────────────────────────
+      // ── Baked NMS [1, 300, 6] ─────────────────────────────────────────────
       else if (dims.length === 3 && dims[2] === 6) {
         const numDets = dims[1];
         const final = [];
@@ -164,15 +145,10 @@ self.onmessage = async (e) => {
           const score  = data[offset + 4];
           if (score < scoreThreshold) continue;
 
-          const x1 = data[offset + 0];
-          const y1 = data[offset + 1];
-          const x2 = data[offset + 2];
-          const y2 = data[offset + 3];
-
-          const x  = (x1 - padX) / scale;
-          const y  = (y1 - padY) / scale;
-          const bw = (x2 - x1) / scale;
-          const bh = (y2 - y1) / scale;
+          const x  = (data[offset + 0] - padX) / scale;
+          const y  = (data[offset + 1] - padY) / scale;
+          const bw = (data[offset + 2] - data[offset + 0]) / scale;
+          const bh = (data[offset + 3] - data[offset + 1]) / scale;
 
           final.push({
             x: Math.max(0, x),
