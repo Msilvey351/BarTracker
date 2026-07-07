@@ -45,7 +45,7 @@ self.onmessage = async (e) => {
       ort.env.wasm.numThreads = 1;
 
       session = await ort.InferenceSession.create(payload.modelPath, {
-        executionProviders: ['wasm'],
+        executionProviders: ['webgpu', 'wasm'],
         graphOptimizationLevel: 'all',
       });
 
