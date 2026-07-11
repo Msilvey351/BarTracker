@@ -87,7 +87,6 @@ export default function BarbellTracker() {
       if (ctx) {
         ctx.drawImage(video, 0, 0);
 
-        // Fire-and-forget inference — never blocks the render loop
         if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
           inferenceInFlightRef.current = true;
           const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
@@ -101,7 +100,6 @@ export default function BarbellTracker() {
           });
         }
 
-        // Always render at full frame rate with last known detections
         const { scale, offsetX, offsetY } = getDisplayOffset();
 
         renderFrame(
@@ -116,7 +114,6 @@ export default function BarbellTracker() {
           offsetY,
         );
 
-        // FPS counter
         fpsRef.current.frames++;
         const now = performance.now();
         if (now - fpsRef.current.last > 1000) {
@@ -367,6 +364,56 @@ export default function BarbellTracker() {
         <StatCard label="Phase" value={kinematics.phase.toUpperCase()} />
       </div>
 
+      {/* Rep History Table */}
+      {kinematics.repHistory.length > 0 && (
+        <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700">
+            <h2 className="text-sm font-semibold text-slate-300">Rep History</h2>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-slate-400 text-xs border-b border-slate-700">
+                <th className="px-4 py-2 text-left">Rep</th>
+                <th className="px-4 py-2 text-right">Con. Avg</th>
+                <th className="px-4 py-2 text-right">Peak</th>
+                <th className="px-4 py-2 text-right">Ecc. Avg</th>
+                <th className="px-4 py-2 text-right">Distance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {kinematics.repHistory.map((rep) => (
+                <tr
+                  key={rep.repNumber}
+                  className="border-b border-slate-800 last:border-0"
+                >
+                  <td className="px-4 py-2 font-mono text-slate-300">
+                    #{rep.repNumber}
+                  </td>
+                  <td className={`px-4 py-2 font-mono text-right font-bold
+                    ${rep.concentricVelocity > 0.5 ? 'text-green-400'
+                    : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
+                    : 'text-red-400'}`}>
+                    {rep.concentricVelocity.toFixed(2)} m/s
+                  </td>
+                  <td className="px-4 py-2 font-mono text-right text-blue-400">
+                    {rep.peakVelocity.toFixed(2)} m/s
+                  </td>
+                  <td className="px-4 py-2 font-mono text-right text-slate-400">
+                    {rep.eccentricVelocity > 0
+                      ? `${rep.eccentricVelocity.toFixed(2)} m/s`
+                      : '--'}
+                  </td>
+                  <td className="px-4 py-2 font-mono text-right text-slate-400">
+                    {(rep.concentricDistance * 100).toFixed(0)}cm
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Errors */}
       {(webcam.error || detector.error) && (
         <div className="text-red-400 text-sm bg-red-950 px-4 py-2 rounded-lg">
           {webcam.error || detector.error}

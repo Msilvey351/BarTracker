@@ -4,6 +4,15 @@ export interface BarPosition {
   timestamp: number;
 }
 
+export interface RepStats {
+  repNumber: number;
+  concentricVelocity: number;   // average m/s during concentric
+  eccentricVelocity: number;    // average m/s during eccentric (0 until eccentric ends)
+  peakVelocity: number;         // peak instantaneous velocity during concentric
+  concentricDistance: number;   // metres travelled during concentric
+  concentricDuration: number;   // seconds
+}
+
 export interface KinematicsState {
   positions: BarPosition[];
   barPath: BarPosition[];
@@ -13,6 +22,10 @@ export interface KinematicsState {
   phase: 'idle' | 'concentric' | 'eccentric';
   pixelsPerMetre: number | null;
   concentricStartTime: number | null;
+  concentricPositions: BarPosition[];   // positions during current concentric
+  eccentricPositions: BarPosition[];    // positions during current eccentric
+  repHistory: RepStats[];               // all completed reps this set
+  currentRepPeakVelocity: number;       // peak during current concentric
 }
 
 export const INITIAL_STATE: KinematicsState = {
@@ -24,6 +37,10 @@ export const INITIAL_STATE: KinematicsState = {
   phase: 'idle',
   pixelsPerMetre: null,
   concentricStartTime: null,
+  concentricPositions: [],
+  eccentricPositions: [],
+  repHistory: [],
+  currentRepPeakVelocity: 0,
 };
 
 export const PLATE_DIAMETER_METRES = 0.45;
@@ -39,27 +56,62 @@ export function computeVelocity(
   pixelsPerMetre: number
 ): number {
   if (positions.length < 2) return 0;
-
   const window = positions.slice(-VELOCITY_WINDOW);
   const first = window[0];
   const last = window[window.length - 1];
-
   const dtSec = (last.timestamp - first.timestamp) / 1000;
   if (dtSec === 0) return 0;
-
   const dxPx = last.x - first.x;
   const dyPx = last.y - first.y;
   const distancePx = Math.sqrt(dxPx * dxPx + dyPx * dyPx);
-  const distanceM = distancePx / pixelsPerMetre;
+  return (distancePx / pixelsPerMetre) / dtSec;
+}
 
-  return distanceM / dtSec;
+// ── Calculate average velocity over a set of positions ────────────────────────
+// Uses only vertical displacement — more meaningful for barbell lifts
+function calcPhaseVelocity(
+  positions: BarPosition[],
+  pixelsPerMetre: number
+): { avgVelocity: number; distance: number; duration: number } {
+  if (positions.length < 2) return { avgVelocity: 0, distance: 0, duration: 0 };
+
+  const first = positions[0];
+  const last = positions[positions.length - 1];
+
+  const duration = (last.timestamp - first.timestamp) / 1000; // seconds
+  if (duration === 0) return { avgVelocity: 0, distance: 0, duration: 0 };
+
+  // Use absolute vertical displacement only — bar travel distance
+  const dyPx = Math.abs(last.y - first.y);
+  const distance = dyPx / pixelsPerMetre; // metres
+
+  const avgVelocity = distance / duration; // m/s
+
+  return { avgVelocity, distance, duration };
+}
+
+// ── Peak velocity over a set of positions ─────────────────────────────────────
+function calcPeakVelocity(
+  positions: BarPosition[],
+  pixelsPerMetre: number
+): number {
+  if (positions.length < 2) return 0;
+  let peak = 0;
+  for (let i = 1; i < positions.length; i++) {
+    const dt = (positions[i].timestamp - positions[i - 1].timestamp) / 1000;
+    if (dt === 0) continue;
+    const dy = Math.abs(positions[i].y - positions[i - 1].y);
+    const v = (dy / pixelsPerMetre) / dt;
+    if (v > peak) peak = v;
+  }
+  return peak;
 }
 
 // ── Rep detection constants ───────────────────────────────────────────────────
-const MIN_TRAVEL_METRES   = 0.10;  // Fix 1 — min 10cm vertical travel
-const MIN_REP_DURATION_MS = 100;   // Fix 2 — min 0.1s concentric phase
-const DIRECTION_FRAMES    = 10;    // Fix 4 — frames to check consistency
-const MIN_CONSISTENCY     = 0.7;   // Fix 4 — 70% of frames same direction
+const MIN_TRAVEL_METRES   = 0.10;
+const MIN_REP_DURATION_MS = 100;
+const DIRECTION_FRAMES    = 10;
+const MIN_CONSISTENCY     = 0.7;
 
 export function detectRep(
   positions: BarPosition[],
@@ -67,16 +119,29 @@ export function detectRep(
   currentPhase: KinematicsState['phase'],
   currentRepCount: number,
   concentricStartTime: number | null,
+  concentricPositions: BarPosition[],
+  eccentricPositions: BarPosition[],
+  repHistory: RepStats[],
+  currentRepPeakVelocity: number,
+  currentVelocity: number,
 ): {
   phase: KinematicsState['phase'];
   repCount: number;
   concentricStartTime: number | null;
+  concentricPositions: BarPosition[];
+  eccentricPositions: BarPosition[];
+  repHistory: RepStats[];
+  currentRepPeakVelocity: number;
 } {
   if (positions.length < DIRECTION_FRAMES) {
     return {
       phase: currentPhase,
       repCount: currentRepCount,
       concentricStartTime,
+      concentricPositions,
+      eccentricPositions,
+      repHistory,
+      currentRepPeakVelocity,
     };
   }
 
@@ -85,11 +150,10 @@ export function detectRep(
   const first = recent[0];
   const last = recent[recent.length - 1];
 
-  // ── Displacement over window ──────────────────────────────────────────────
-  const dyMetres = (last.y - first.y) / pixelsPerMetre; // negative = up
+  const dyMetres = (last.y - first.y) / pixelsPerMetre;
   const dyAbsMetres = Math.abs(dyMetres);
 
-  // ── Fix 4 — Direction consistency ────────────────────────────────────────
+  // Direction consistency
   let upFrames = 0;
   let downFrames = 0;
   for (let i = 1; i < recent.length; i++) {
@@ -103,22 +167,35 @@ export function detectRep(
   let phase = currentPhase;
   let repCount = currentRepCount;
   let newConcentricStartTime = concentricStartTime;
+  let newConcentricPositions = concentricPositions;
+  let newEccentricPositions  = eccentricPositions;
+  let newRepHistory = repHistory;
+  let newPeakVelocity = currentRepPeakVelocity;
+
+  const latestPos = positions[positions.length - 1];
 
   // ── Concentric — bar going UP ─────────────────────────────────────────────
   const isGoingUp = (
-    dyMetres < -MIN_TRAVEL_METRES &&      // Fix 1 — enough vertical travel
-    upConsistency >= MIN_CONSISTENCY      // Fix 4 — consistently moving up
+    dyMetres < -MIN_TRAVEL_METRES &&
+    upConsistency >= MIN_CONSISTENCY
   );
 
   if (isGoingUp && currentPhase !== 'concentric') {
     phase = 'concentric';
     newConcentricStartTime = now;
+    newConcentricPositions = [latestPos];
+    newEccentricPositions  = [];
+    newPeakVelocity = 0;
+  } else if (currentPhase === 'concentric') {
+    // Accumulate positions and track peak
+    newConcentricPositions = [...concentricPositions, latestPos];
+    newPeakVelocity = Math.max(currentRepPeakVelocity, currentVelocity);
   }
 
   // ── Eccentric — bar going DOWN after concentric ───────────────────────────
   const isGoingDown = (
-    dyMetres > 0.05 &&                    // moving down
-    downConsistency >= MIN_CONSISTENCY && // Fix 4 — consistently moving down
+    dyMetres > 0.05 &&
+    downConsistency >= MIN_CONSISTENCY &&
     currentPhase === 'concentric'
   );
 
@@ -126,29 +203,76 @@ export function detectRep(
     const concentricDuration = concentricStartTime ? now - concentricStartTime : 0;
 
     if (concentricDuration >= MIN_REP_DURATION_MS) {
-      // Fix 2 — only count if concentric lasted at least 0.1s
-      phase = 'eccentric';
+      // ── Calculate concentric stats ──────────────────────────────────────
+      const {
+        avgVelocity: concAvg,
+        distance: concDist,
+        duration: concDur,
+      } = calcPhaseVelocity(newConcentricPositions, pixelsPerMetre);
+
+      const peakV = calcPeakVelocity(newConcentricPositions, pixelsPerMetre);
+
       repCount += 1;
+      phase = 'eccentric';
       newConcentricStartTime = null;
+      newEccentricPositions = [latestPos];
+
+      // Add rep to history with concentric stats
+      // Eccentric will be filled in when eccentric ends
+      const newRep: RepStats = {
+        repNumber: repCount,
+        concentricVelocity: concAvg,
+        eccentricVelocity: 0,       // filled in when eccentric ends
+        peakVelocity: peakV,
+        concentricDistance: concDist,
+        concentricDuration: concDur,
+      };
+      newRepHistory = [...repHistory, newRep];
+      newPeakVelocity = 0;
+
     } else {
-      // Too short — noise, reset
       phase = 'idle';
       newConcentricStartTime = null;
+      newConcentricPositions = [];
     }
   }
 
-  // ── Return to idle ────────────────────────────────────────────────────────
-  if (
-    dyAbsMetres < 0.02 &&
-    currentPhase === 'eccentric'
-  ) {
+  // ── Accumulate eccentric positions ────────────────────────────────────────
+  if (currentPhase === 'eccentric') {
+    newEccentricPositions = [...eccentricPositions, latestPos];
+  }
+
+  // ── Return to idle — eccentric complete ───────────────────────────────────
+  if (dyAbsMetres < 0.02 && currentPhase === 'eccentric') {
     phase = 'idle';
+
+    // ── Calculate eccentric stats and update last rep ─────────────────────
+    if (newEccentricPositions.length >= 2 && newRepHistory.length > 0) {
+      const { avgVelocity: eccAvg } = calcPhaseVelocity(
+        newEccentricPositions,
+        pixelsPerMetre
+      );
+
+      // Update the last rep with eccentric velocity
+      const updatedHistory = [...newRepHistory];
+      updatedHistory[updatedHistory.length - 1] = {
+        ...updatedHistory[updatedHistory.length - 1],
+        eccentricVelocity: eccAvg,
+      };
+      newRepHistory = updatedHistory;
+    }
+
+    newEccentricPositions = [];
   }
 
   return {
     phase,
     repCount,
     concentricStartTime: newConcentricStartTime,
+    concentricPositions: newConcentricPositions,
+    eccentricPositions:  newEccentricPositions,
+    repHistory: newRepHistory,
+    currentRepPeakVelocity: newPeakVelocity,
   };
 }
 
@@ -165,30 +289,32 @@ export function updateKinematics(
 
   const newBarPos: BarPosition = { ...newPos, timestamp };
   const positions = [...state.positions, newBarPos].slice(-60);
-  const barPath = [...state.barPath, newBarPos].slice(-300);
+  const barPath   = [...state.barPath,   newBarPos].slice(-300);
 
-  const velocity = pixelsPerMetre
-    ? computeVelocity(positions, pixelsPerMetre)
-    : 0;
-
+  const velocity     = pixelsPerMetre ? computeVelocity(positions, pixelsPerMetre) : 0;
   const peakVelocity = Math.max(state.peakVelocity, velocity);
 
-  const {
-    phase,
-    repCount,
-    concentricStartTime,
-  } = pixelsPerMetre
+  const result = pixelsPerMetre
     ? detectRep(
         positions,
         pixelsPerMetre,
         state.phase,
         state.repCount,
         state.concentricStartTime,
+        state.concentricPositions,
+        state.eccentricPositions,
+        state.repHistory,
+        state.currentRepPeakVelocity,
+        velocity,
       )
     : {
-        phase: state.phase,
-        repCount: state.repCount,
-        concentricStartTime: state.concentricStartTime,
+        phase:                  state.phase,
+        repCount:               state.repCount,
+        concentricStartTime:    state.concentricStartTime,
+        concentricPositions:    state.concentricPositions,
+        eccentricPositions:     state.eccentricPositions,
+        repHistory:             state.repHistory,
+        currentRepPeakVelocity: state.currentRepPeakVelocity,
       };
 
   return {
@@ -196,22 +322,30 @@ export function updateKinematics(
     barPath,
     velocity,
     peakVelocity,
-    repCount,
-    phase,
+    repCount:               result.repCount,
+    phase:                  result.phase,
     pixelsPerMetre,
-    concentricStartTime,
+    concentricStartTime:    result.concentricStartTime,
+    concentricPositions:    result.concentricPositions,
+    eccentricPositions:     result.eccentricPositions,
+    repHistory:             result.repHistory,
+    currentRepPeakVelocity: result.currentRepPeakVelocity,
   };
 }
 
 export function resetSet(state: KinematicsState): KinematicsState {
   return {
     ...state,
-    positions: [],
-    barPath: [],
-    velocity: 0,
-    peakVelocity: 0,
-    repCount: 0,
-    phase: 'idle',
-    concentricStartTime: null,
+    positions:              [],
+    barPath:                [],
+    velocity:               0,
+    peakVelocity:           0,
+    repCount:               0,
+    phase:                  'idle',
+    concentricStartTime:    null,
+    concentricPositions:    [],
+    eccentricPositions:     [],
+    repHistory:             [],
+    currentRepPeakVelocity: 0,
   };
 }
