@@ -5,7 +5,7 @@ import { useWebcam } from '@/hooks/useWebcam';
 import { useDetectorWorker } from '@/hooks/useDetectorWorker';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
-import { DEFAULT_CONFIG } from '@/lib/detector';
+import { DEFAULT_CONFIG, PLATE_CONFIG } from '@/lib/detector';
 import type { Detection } from '@/lib/detector';
 import type { RepStats } from '@/lib/kinematics';
 
@@ -18,10 +18,12 @@ export default function BarbellTracker() {
   const animFrameRef = useRef<number>(0);
   const isRunningRef = useRef(false);
   const inferenceInFlightRef = useRef(false);
+  const plateInFlightRef = useRef(false);
   const lastDetectionsRef = useRef<Detection[]>([]);
 
   const webcam = useWebcam(videoRef);
   const detector = useDetectorWorker(DEFAULT_CONFIG);
+  const plateDetector = useDetectorWorker(PLATE_CONFIG);
   const {
     kinematics,
     update: updateKinematics,
@@ -47,6 +49,8 @@ export default function BarbellTracker() {
   useEffect(() => { webcamRef.current = webcam; }, [webcam]);
   const detectorRef = useRef(detector);
   useEffect(() => { detectorRef.current = detector; }, [detector]);
+  const plateDetectorRef = useRef(plateDetector);
+  useEffect(() => { plateDetectorRef.current = plateDetector; }, [plateDetector]);
   const updateKinematicsRef = useRef(updateKinematics);
   useEffect(() => { updateKinematicsRef.current = updateKinematics; }, [updateKinematics]);
   const updateCalibrationRef = useRef(updateCalibration);
@@ -61,8 +65,6 @@ export default function BarbellTracker() {
     isRunningRef.current = false;
     cancelAnimationFrame(animFrameRef.current);
     setIsTracking(false);
-
-    // Capture completed reps at this moment
     const reps = kinematicsRef.current.repHistory;
     if (reps.length > 0) {
       setCompletedReps(reps);
@@ -75,17 +77,14 @@ export default function BarbellTracker() {
     const video = videoRef.current;
     const overlay = overlayCanvasRef.current;
     if (!video || !overlay) return { scale: 1, offsetX: 0, offsetY: 0 };
-
     const displayW = overlay.clientWidth;
     const displayH = overlay.clientHeight;
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
     if (!videoW || !videoH) return { scale: 1, offsetX: 0, offsetY: 0 };
-
     const scale   = Math.min(displayW / videoW, displayH / videoH);
     const offsetX = (displayW - videoW * scale) / 2;
     const offsetY = (displayH - videoH * scale) / 2;
-
     return { scale, offsetX, offsetY };
   }, []);
 
@@ -97,7 +96,6 @@ export default function BarbellTracker() {
     const overlay   = overlayCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
-    // Auto end set when video finishes
     if (video && video.ended) {
       endSet();
       return;
@@ -112,24 +110,35 @@ export default function BarbellTracker() {
         ctx.drawImage(video, 0, 0);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
 
+        // ── Barbell detection — tracking ──────────────────────────────────
         if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
           inferenceInFlightRef.current = true;
-
           detectorRef.current.detect(imageData).then((result) => {
             if (result.length > 0) {
               lastDetectionsRef.current = result;
               updateKinematicsRef.current(result);
-
-              if (!kinematicsRef.current.pixelsPerMetre) {
-                updateCalibrationRef.current(result);
-              }
             }
             inferenceInFlightRef.current = false;
           });
         }
 
-        const { scale, offsetX, offsetY } = getDisplayOffset();
+        // ── Plate detection — calibration only, stops once calibrated ─────
+        if (
+          !plateInFlightRef.current &&
+          !kinematicsRef.current.pixelsPerMetre &&
+          plateDetectorRef.current.status === 'ready'
+        ) {
+          plateInFlightRef.current = true;
+          plateDetectorRef.current.detect(imageData).then((result) => {
+            if (result.length > 0) {
+              updateCalibrationRef.current(result);
+            }
+            plateInFlightRef.current = false;
+          });
+        }
 
+        // ── Render ────────────────────────────────────────────────────────
+        const { scale, offsetX, offsetY } = getDisplayOffset();
         renderFrame(
           overlay,
           overlay.clientWidth,
@@ -158,6 +167,7 @@ export default function BarbellTracker() {
   const startCamera = useCallback(async () => {
     if (!webcamRef.current.isReady) await webcamRef.current.start();
     inferenceInFlightRef.current = false;
+    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -196,6 +206,7 @@ export default function BarbellTracker() {
     video.playbackRate = playbackSpeed;
     video.play();
     inferenceInFlightRef.current = false;
+    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -211,12 +222,14 @@ export default function BarbellTracker() {
     setIsTracking(false);
   }, []);
 
-  // ── New set — reset everything ────────────────────────────────────────────
+  // ── New set ───────────────────────────────────────────────────────────────
   const startNewSet = useCallback(() => {
     setSetComplete(false);
     setCompletedReps([]);
     resetKinematics();
     lastDetectionsRef.current = [];
+    inferenceInFlightRef.current = false;
+    plateInFlightRef.current = false;
   }, [resetKinematics]);
 
   // ── Mode switching ────────────────────────────────────────────────────────
@@ -235,6 +248,7 @@ export default function BarbellTracker() {
     setSetComplete(false);
     setCompletedReps([]);
     inferenceInFlightRef.current = false;
+    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
   }, [resetKinematics]);
 
@@ -259,41 +273,42 @@ export default function BarbellTracker() {
   const bestRep = completedReps.length > 0
     ? completedReps.reduce((a, b) => a.concentricVelocity > b.concentricVelocity ? a : b)
     : null;
-  const worstRep = completedReps.length > 0
-    ? completedReps.reduce((a, b) => a.concentricVelocity < b.concentricVelocity ? a : b)
-    : null;
-  const velocityLoss = bestRep && worstRep
-    ? ((bestRep.concentricVelocity - worstRep.concentricVelocity) / bestRep.concentricVelocity * 100)
+  const velocityLoss = bestRep && completedReps.length > 1
+    ? (() => {
+        const worst = completedReps.reduce((a, b) => a.concentricVelocity < b.concentricVelocity ? a : b);
+        return (bestRep.concentricVelocity - worst.concentricVelocity) / bestRep.concentricVelocity * 100;
+      })()
     : 0;
+
+  const modelsReady = detector.status === 'ready' && plateDetector.status === 'ready';
+  const modelsLoading = detector.status === 'loading' || plateDetector.status === 'loading';
 
   return (
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
       <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
 
-      {/* Status */}
+      {/* Status — hide when set complete */}
       {!setComplete && (
         <div className="flex gap-3 text-sm flex-wrap justify-center">
-          <StatusBadge label="Model" value={detector.status} ok={detector.status === 'ready'} />
+          <StatusBadge label="Barbell" value={detector.status} ok={detector.status === 'ready'} />
+          <StatusBadge label="Plate" value={plateDetector.status} ok={plateDetector.status === 'ready'} />
           <StatusBadge label="Camera" value={webcam.isReady ? 'ready' : 'off'} ok={webcam.isReady} />
           <StatusBadge label="FPS" value={fps.toString()} ok={fps > 5} />
         </div>
       )}
 
-      {/* ── Set complete summary ── */}
+      {/* ── Set complete summary ────────────────────────────────────────────── */}
       {setComplete && completedReps.length > 0 ? (
         <div className="w-full max-w-xl flex flex-col gap-4">
 
-          {/* Header */}
           <div className="text-center">
-            <div className="text-2xl font-bold text-green-400 mb-1">
-              ✅ Set Complete
-            </div>
+            <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
             <div className="text-slate-400 text-sm">
               {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
             </div>
           </div>
 
-          {/* Summary stats */}
+          {/* Summary cards */}
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-center">
               <div className="text-slate-400 text-xs mb-1">Avg Velocity</div>
@@ -324,7 +339,7 @@ export default function BarbellTracker() {
             </div>
           </div>
 
-          {/* Per rep table */}
+          {/* Per rep breakdown */}
           <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-700">
               <h2 className="text-sm font-semibold text-slate-300">
@@ -335,7 +350,7 @@ export default function BarbellTracker() {
               <thead>
                 <tr className="text-slate-400 text-xs border-b border-slate-700">
                   <th className="px-4 py-2 text-left">Rep</th>
-                  <th className="px-4 py-2 text-right">Avg Velocity</th>
+                  <th className="px-4 py-2 text-right">Avg</th>
                   <th className="px-4 py-2 text-right">Peak</th>
                   <th className="px-4 py-2 text-right">Distance</th>
                   <th className="px-4 py-2 text-right">vs Best</th>
@@ -343,17 +358,12 @@ export default function BarbellTracker() {
               </thead>
               <tbody>
                 {completedReps.map((rep) => {
-                  const vsDrop = bestRep
-                    ? ((bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100)
+                  const drop = bestRep
+                    ? (bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100
                     : 0;
                   return (
-                    <tr
-                      key={rep.repNumber}
-                      className="border-b border-slate-800 last:border-0"
-                    >
-                      <td className="px-4 py-2 font-mono text-slate-300">
-                        #{rep.repNumber}
-                      </td>
+                    <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
+                      <td className="px-4 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
                       <td className={`px-4 py-2 font-mono text-right font-bold
                         ${rep.concentricVelocity > 0.5 ? 'text-green-400'
                         : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
@@ -367,10 +377,10 @@ export default function BarbellTracker() {
                         {(rep.concentricDistance * 100).toFixed(0)}cm
                       </td>
                       <td className={`px-4 py-2 font-mono text-right text-xs
-                        ${vsDrop < 5 ? 'text-green-400'
-                        : vsDrop < 15 ? 'text-yellow-400'
+                        ${drop < 5 ? 'text-green-400'
+                        : drop < 15 ? 'text-yellow-400'
                         : 'text-red-400'}`}>
-                        {vsDrop < 1 ? '🏆 best' : `-${vsDrop.toFixed(0)}%`}
+                        {drop < 1 ? '🏆 best' : `-${drop.toFixed(0)}%`}
                       </td>
                     </tr>
                   );
@@ -379,7 +389,6 @@ export default function BarbellTracker() {
             </table>
           </div>
 
-          {/* New set button */}
           <button
             onClick={startNewSet}
             className="w-full py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700 transition-colors"
@@ -389,7 +398,7 @@ export default function BarbellTracker() {
         </div>
 
       ) : (
-        /* ── Normal tracking UI ── */
+        /* ── Normal tracking UI ───────────────────────────────────────────── */
         <>
           {/* Mode toggle */}
           <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
@@ -438,19 +447,18 @@ export default function BarbellTracker() {
             <div className="flex gap-3 flex-wrap justify-center">
               <button
                 onClick={isTracking ? stopCamera : startCamera}
-                disabled={detector.status !== 'ready'}
+                disabled={!modelsReady}
                 className={`px-6 py-2.5 rounded-lg font-semibold text-sm transition-colors
                   ${isTracking
                     ? 'bg-red-600 hover:bg-red-700'
                     : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
                   }`}
               >
-                {detector.status === 'loading'
-                  ? 'Loading model...'
+                {modelsLoading
+                  ? 'Loading models...'
                   : isTracking ? '⏹ Stop' : '▶ Start Tracking'}
               </button>
 
-              {/* End Set button — only shows while tracking */}
               {isTracking && (
                 <button
                   onClick={endSet}
@@ -512,7 +520,7 @@ export default function BarbellTracker() {
                 <div className="flex gap-3">
                   <button
                     onClick={isTracking ? pauseVideoAnalysis : startVideoAnalysis}
-                    disabled={!videoReady || detector.status !== 'ready'}
+                    disabled={!videoReady || !modelsReady}
                     className={`px-6 py-2.5 rounded-lg font-semibold text-sm transition-colors
                       ${isTracking
                         ? 'bg-yellow-600 hover:bg-yellow-700'
@@ -521,6 +529,8 @@ export default function BarbellTracker() {
                   >
                     {!videoReady
                       ? 'Loading video...'
+                      : modelsLoading
+                      ? 'Loading models...'
                       : isTracking ? '⏸ Pause' : '▶ Analyse Video'}
                   </button>
                   <button
@@ -567,13 +577,8 @@ export default function BarbellTracker() {
                 </thead>
                 <tbody>
                   {kinematics.repHistory.map((rep) => (
-                    <tr
-                      key={rep.repNumber}
-                      className="border-b border-slate-800 last:border-0"
-                    >
-                      <td className="px-4 py-2 font-mono text-slate-300">
-                        #{rep.repNumber}
-                      </td>
+                    <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
+                      <td className="px-4 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
                       <td className={`px-4 py-2 font-mono text-right font-bold
                         ${rep.concentricVelocity > 0.5 ? 'text-green-400'
                         : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
@@ -601,9 +606,9 @@ export default function BarbellTracker() {
       )}
 
       {/* Errors */}
-      {(webcam.error || detector.error) && (
+      {(webcam.error || detector.error || plateDetector.error) && (
         <div className="text-red-400 text-sm bg-red-950 px-4 py-2 rounded-lg">
-          {webcam.error || detector.error}
+          {webcam.error || detector.error || plateDetector.error}
         </div>
       )}
     </div>
