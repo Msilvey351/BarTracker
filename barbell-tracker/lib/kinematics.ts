@@ -51,8 +51,17 @@ export function calibrateFromPlate(plateBboxHeightPx: number): number {
   return plateBboxHeightPx / PLATE_DIAMETER_METRES;
 }
 
-// ── Velocity window — larger = smoother but slower to react ──────────────────
 const VELOCITY_WINDOW = 8;
+
+// ── Option A — Maximum position jump filter ───────────────────────────────────
+// If bar teleports more than this between frames it's a detection glitch
+const MAX_JUMP_PX = 150;
+
+// ── Option B — Minimum detection score ───────────────────────────────────────
+// Only positions from high-confidence detections are used
+// (Note: primary score filter is in detector config at 0.45
+//  this is a secondary check inside kinematics)
+const MIN_POSITION_SCORE = 0.40;
 
 export function computeVelocity(
   positions: BarPosition[],
@@ -74,7 +83,6 @@ export function computeVelocity(
   return Math.min((distancePx / pixelsPerMetre) / dtSec, 3.0);
 }
 
-// ── Phase detection constants ─────────────────────────────────────────────────
 const DIRECTION_FRAMES    = 10;
 const MIN_CONSISTENCY     = 0.7;
 const MIN_TRAVEL_METRES   = 0.10;
@@ -179,7 +187,6 @@ export function detectRep(
   const latestPos = positions[positions.length - 1];
 
   switch (currentPhase) {
-
     case 'idle': {
       if (isSustainedUp) {
         phase = 'concentric';
@@ -281,8 +288,32 @@ export function updateKinematics(
   state: KinematicsState,
   newPos: { x: number; y: number },
   timestamp: number,
+  score: number = 1.0,  // ← detection confidence score
 ): KinematicsState {
   const { pixelsPerMetre, calibrationLocked } = state;
+
+  // ── Option B — ignore low confidence detections ───────────────────────────
+  if (score < MIN_POSITION_SCORE) {
+    if (Math.random() < 0.05) {
+      console.log(`⚠️ Skipping low confidence detection: score=${score.toFixed(3)}`);
+    }
+    return state;
+  }
+
+  // ── Option A — ignore position jumps (detection glitches) ────────────────
+  if (state.positions.length > 0) {
+    const last = state.positions[state.positions.length - 1];
+    const jumpPx = Math.sqrt(
+      Math.pow(newPos.x - last.x, 2) +
+      Math.pow(newPos.y - last.y, 2)
+    );
+    if (jumpPx > MAX_JUMP_PX) {
+      if (Math.random() < 0.1) {
+        console.log(`⚠️ Skipping position jump: ${jumpPx.toFixed(0)}px (max ${MAX_JUMP_PX}px)`);
+      }
+      return state; // ignore this detection entirely
+    }
+  }
 
   const newBarPos: BarPosition = { ...newPos, timestamp };
   const positions = [...state.positions, newBarPos].slice(-60);
@@ -331,15 +362,12 @@ export function updateKinematics(
   };
 }
 
-// ── Called once with plate detection — locks calibration immediately ──────────
 export function applyCalibration(
   state: KinematicsState,
   plateDetections: Array<{ height: number; score: number }>
 ): KinematicsState {
-  // Already locked — never update again
   if (state.calibrationLocked) return state;
 
-  // Find largest plate detection
   const best = plateDetections
     .filter(d => d.height > 20 && d.height < 800)
     .sort((a, b) => b.height - a.height)[0];
@@ -352,7 +380,7 @@ export function applyCalibration(
   return {
     ...state,
     pixelsPerMetre,
-    calibrationLocked: true,  // never changes again this session
+    calibrationLocked: true,
   };
 }
 
@@ -370,11 +398,9 @@ export function resetSet(state: KinematicsState): KinematicsState {
     eccentricPositions:     [],
     repHistory:             [],
     currentRepPeakVelocity: 0,
-    // NOTE: pixelsPerMetre and calibrationLocked are preserved across sets
   };
 }
 
-// ── Full reset including calibration — call between different videos ──────────
 export function fullReset(): KinematicsState {
   return { ...INITIAL_STATE };
 }

@@ -15,7 +15,7 @@ export function useKinematics() {
   const [state, setState] = useState<KinematicsState>(INITIAL_STATE);
   const stateRef = useRef(INITIAL_STATE);
 
-  // ── Live camera — uses wall clock time ───────────────────────────────────
+  // ── Live camera — wall clock time ─────────────────────────────────────────
   const update = useCallback((detections: Detection[]) => {
     if (detections.length === 0) return;
     const best = detections[0];
@@ -24,13 +24,14 @@ export function useKinematics() {
       stateRef.current,
       { x: best.centerX, y: best.centerY },
       performance.now(),
+      best.score,           // ← pass score for Option B
     );
 
     stateRef.current = next;
     setState(next);
   }, []);
 
-  // ── Frame-by-frame — uses video timestamp for determinism ────────────────
+  // ── Frame-by-frame — video timestamp ─────────────────────────────────────
   const updateWithTimestamp = useCallback((detections: Detection[], timestampMs: number) => {
     if (detections.length === 0) return;
     const best = detections[0];
@@ -38,14 +39,15 @@ export function useKinematics() {
     const next = updateKinematics(
       stateRef.current,
       { x: best.centerX, y: best.centerY },
-      timestampMs,  // ← video time in ms, same every run
+      timestampMs,
+      best.score,           // ← pass score for Option B
     );
 
     stateRef.current = next;
     setState(next);
   }, []);
 
-  // ── Calibration — locks on first plate detection ─────────────────────────
+  // ── Calibration ───────────────────────────────────────────────────────────
   const updateCalibration = useCallback((plateDetections: Detection[]) => {
     if (stateRef.current.calibrationLocked) return;
 
@@ -58,21 +60,21 @@ export function useKinematics() {
     setState(next);
   }, []);
 
-  // ── Reset set stats — keeps calibration ──────────────────────────────────
+  // ── Reset set — keeps calibration ─────────────────────────────────────────
   const reset = useCallback(() => {
     const next = resetSet(stateRef.current);
     stateRef.current = next;
     setState(next);
   }, []);
 
-  // ── Full reset — clears calibration too ──────────────────────────────────
+  // ── Full reset — clears calibration ──────────────────────────────────────
   const resetAll = useCallback(() => {
     const next = fullReset();
     stateRef.current = next;
     setState(next);
   }, []);
 
-  // ── Manual calibration override ───────────────────────────────────────────
+  // ── Manual calibration ────────────────────────────────────────────────────
   const setCalibration = useCallback((pixelsPerMetre: number) => {
     const next = {
       ...stateRef.current,
