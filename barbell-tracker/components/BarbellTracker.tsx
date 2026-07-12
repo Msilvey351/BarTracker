@@ -5,7 +5,7 @@ import { useWebcam } from '@/hooks/useWebcam';
 import { useDetectorWorker } from '@/hooks/useDetectorWorker';
 import { useKinematics } from '@/hooks/useKinematics';
 import { renderFrame, DEFAULT_RENDER_OPTIONS } from '@/lib/renderer';
-import { DEFAULT_CONFIG, PLATE_CONFIG } from '@/lib/detector';
+import { DEFAULT_CONFIG } from '@/lib/detector';
 import type { Detection } from '@/lib/detector';
 
 type Mode = 'camera' | 'upload';
@@ -17,12 +17,10 @@ export default function BarbellTracker() {
   const animFrameRef = useRef<number>(0);
   const isRunningRef = useRef(false);
   const inferenceInFlightRef = useRef(false);
-  const plateInFlightRef = useRef(false);
   const lastDetectionsRef = useRef<Detection[]>([]);
 
   const webcam = useWebcam(videoRef);
   const detector = useDetectorWorker(DEFAULT_CONFIG);
-  const plateDetector = useDetectorWorker(PLATE_CONFIG);
   const {
     kinematics,
     update: updateKinematics,
@@ -46,8 +44,6 @@ export default function BarbellTracker() {
   useEffect(() => { webcamRef.current = webcam; }, [webcam]);
   const detectorRef = useRef(detector);
   useEffect(() => { detectorRef.current = detector; }, [detector]);
-  const plateDetectorRef = useRef(plateDetector);
-  useEffect(() => { plateDetectorRef.current = plateDetector; }, [plateDetector]);
   const updateKinematicsRef = useRef(updateKinematics);
   useEffect(() => { updateKinematicsRef.current = updateKinematics; }, [updateKinematics]);
   const updateCalibrationRef = useRef(updateCalibration);
@@ -99,33 +95,23 @@ export default function BarbellTracker() {
         ctx.drawImage(video, 0, 0);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
 
-        // ── Barbell detection — tracking ──────────────────────────────────
+        // ── Single model — plate detection for both tracking + calibration ──
         if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
           inferenceInFlightRef.current = true;
 
           detectorRef.current.detect(imageData).then((result) => {
             if (result.length > 0) {
               lastDetectionsRef.current = result;
+
+              // Use for tracking (bar position)
               updateKinematicsRef.current(result);
+
+              // Also use for calibration if not yet calibrated
+              if (!kinematicsRef.current.pixelsPerMetre) {
+                updateCalibrationRef.current(result);
+              }
             }
             inferenceInFlightRef.current = false;
-          });
-        }
-
-        // ── Plate detection — calibration only ────────────────────────────
-        // Stops running once calibrated to save performance
-        if (
-          !plateInFlightRef.current &&
-          !kinematicsRef.current.pixelsPerMetre &&
-          plateDetectorRef.current.status === 'ready'
-        ) {
-          plateInFlightRef.current = true;
-
-          plateDetectorRef.current.detect(imageData).then((result) => {
-            if (result.length > 0) {
-              updateCalibrationRef.current(result);
-            }
-            plateInFlightRef.current = false;
           });
         }
 
@@ -161,7 +147,6 @@ export default function BarbellTracker() {
   const startCamera = useCallback(async () => {
     if (!webcamRef.current.isReady) await webcamRef.current.start();
     inferenceInFlightRef.current = false;
-    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -196,7 +181,6 @@ export default function BarbellTracker() {
     video.playbackRate = playbackSpeed;
     video.play();
     inferenceInFlightRef.current = false;
-    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
     isRunningRef.current = true;
     setIsTracking(true);
@@ -224,7 +208,6 @@ export default function BarbellTracker() {
     setMode(newMode);
     setVideoReady(false);
     inferenceInFlightRef.current = false;
-    plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
   }, [resetKinematics]);
 
@@ -242,10 +225,6 @@ export default function BarbellTracker() {
     };
   }, []);
 
-  // Both models must be ready before tracking can start
-  const modelsReady = detector.status === 'ready' && plateDetector.status === 'ready';
-  const modelsLoading = detector.status === 'loading' || plateDetector.status === 'loading';
-
   return (
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
       <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
@@ -253,14 +232,9 @@ export default function BarbellTracker() {
       {/* Status */}
       <div className="flex gap-3 text-sm flex-wrap justify-center">
         <StatusBadge
-          label="Barbell Model"
+          label="Model"
           value={detector.status}
           ok={detector.status === 'ready'}
-        />
-        <StatusBadge
-          label="Plate Model"
-          value={plateDetector.status}
-          ok={plateDetector.status === 'ready'}
         />
         <StatusBadge
           label="Camera"
@@ -321,15 +295,15 @@ export default function BarbellTracker() {
         <div className="flex gap-3 flex-wrap justify-center">
           <button
             onClick={isTracking ? stopCamera : startCamera}
-            disabled={!modelsReady}
+            disabled={detector.status !== 'ready'}
             className={`px-6 py-2.5 rounded-lg font-semibold text-sm transition-colors
               ${isTracking
                 ? 'bg-red-600 hover:bg-red-700'
                 : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
               }`}
           >
-            {modelsLoading
-              ? 'Loading models...'
+            {detector.status === 'loading'
+              ? 'Loading model...'
               : isTracking ? '⏹ Stop' : '▶ Start Tracking'}
           </button>
           <button
@@ -384,7 +358,7 @@ export default function BarbellTracker() {
             <div className="flex gap-3">
               <button
                 onClick={isTracking ? pauseVideoAnalysis : startVideoAnalysis}
-                disabled={!videoReady || !modelsReady}
+                disabled={!videoReady || detector.status !== 'ready'}
                 className={`px-6 py-2.5 rounded-lg font-semibold text-sm transition-colors
                   ${isTracking
                     ? 'bg-yellow-600 hover:bg-yellow-700'
@@ -393,8 +367,6 @@ export default function BarbellTracker() {
               >
                 {!videoReady
                   ? 'Loading video...'
-                  : modelsLoading
-                  ? 'Loading models...'
                   : isTracking ? '⏸ Pause' : '▶ Analyse Video'}
               </button>
               <button
@@ -473,9 +445,9 @@ export default function BarbellTracker() {
       )}
 
       {/* Errors */}
-      {(webcam.error || detector.error || plateDetector.error) && (
+      {(webcam.error || detector.error) && (
         <div className="text-red-400 text-sm bg-red-950 px-4 py-2 rounded-lg">
-          {webcam.error || detector.error || plateDetector.error}
+          {webcam.error || detector.error}
         </div>
       )}
     </div>

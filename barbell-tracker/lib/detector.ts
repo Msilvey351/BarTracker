@@ -22,13 +22,13 @@ export interface ModelConfig {
 }
 
 export const DEFAULT_CONFIG: ModelConfig = {
-  modelPath: '/models/barbell.onnx',
+  modelPath: '/models/plate.onnx',
   nmsPath: '',
   inputWidth: 320,
   inputHeight: 320,
   topK: 1,              // ← only keep the single best detection
   iouThreshold: 0.45,
-  scoreThreshold: 0.45, // ← raise from 0.25 to 0.45
+  scoreThreshold: 0.35, // ← raise from 0.25 to 0.45
 };
 
 export const PLATE_CONFIG: ModelConfig = {
