@@ -10,23 +10,22 @@ import type { Detection } from '@/lib/detector';
 import type { RepStats } from '@/lib/kinematics';
 
 type Mode = 'camera' | 'upload';
-type AnalysisState = 'idle' | 'analysing' | 'paused' | 'complete';
+type AnalysisState = 'idle' | 'analysing' | 'complete';
 
 export default function BarbellTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // ── Camera loop refs ──────────────────────────────────────────────────────
+  // Camera loop refs
   const animFrameRef = useRef<number>(0);
   const isRunningRef = useRef(false);
   const inferenceInFlightRef = useRef(false);
   const plateInFlightRef = useRef(false);
   const lastDetectionsRef = useRef<Detection[]>([]);
 
-  // ── Frame-by-frame analysis refs ──────────────────────────────────────────
+  // Frame-by-frame refs
   const analysisAbortRef = useRef(false);
-  const analysisProgressRef = useRef(0);
 
   const webcam = useWebcam(videoRef);
   const detector = useDetectorWorker(DEFAULT_CONFIG);
@@ -34,6 +33,7 @@ export default function BarbellTracker() {
   const {
     kinematics,
     update: updateKinematics,
+    updateWithTimestamp,
     updateCalibration,
     reset: resetKinematics,
     resetAll,
@@ -65,6 +65,8 @@ export default function BarbellTracker() {
   useEffect(() => { plateDetectorRef.current = plateDetector; }, [plateDetector]);
   const updateKinematicsRef = useRef(updateKinematics);
   useEffect(() => { updateKinematicsRef.current = updateKinematics; }, [updateKinematics]);
+  const updateWithTimestampRef = useRef(updateWithTimestamp);
+  useEffect(() => { updateWithTimestampRef.current = updateWithTimestamp; }, [updateWithTimestamp]);
   const updateCalibrationRef = useRef(updateCalibration);
   useEffect(() => { updateCalibrationRef.current = updateCalibration; }, [updateCalibration]);
 
@@ -72,7 +74,7 @@ export default function BarbellTracker() {
     offscreenCanvasRef.current = document.createElement('canvas');
   }, []);
 
-  // ── End set ───────────────────────────────────────────────────────────────
+  // ── End set (camera mode) ─────────────────────────────────────────────────
   const endSet = useCallback(() => {
     isRunningRef.current = false;
     cancelAnimationFrame(animFrameRef.current);
@@ -105,17 +107,15 @@ export default function BarbellTracker() {
     const video = videoRef.current;
     const offscreen = offscreenCanvasRef.current;
     if (!video || !offscreen) return null;
-
     offscreen.width  = video.videoWidth;
     offscreen.height = video.videoHeight;
     const ctx = offscreen.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
-
     ctx.drawImage(video, 0, 0);
     return ctx.getImageData(0, 0, offscreen.width, offscreen.height);
   }, []);
 
-  // ── Render current frame overlay ──────────────────────────────────────────
+  // ── Render overlay ────────────────────────────────────────────────────────
   const renderCurrentFrame = useCallback((detections: Detection[]) => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
@@ -138,25 +138,23 @@ export default function BarbellTracker() {
     const video = videoRef.current;
     if (!video) return;
 
-    // Reset everything for fresh analysis
     resetAll();
     analysisAbortRef.current = false;
     setAnalysisState('analysing');
     setSetComplete(false);
     setCompletedReps([]);
+    setAnalysisProgress(0);
 
-    // Calculate total frames
-    const videoFps = 30; // assume 30fps — good enough for most phone videos
+    const videoFps  = 30;
     const frameTime = 1 / videoFps;
-    const duration = video.duration;
+    const duration  = video.duration;
     const estimated = Math.floor(duration * videoFps);
     setTotalFrames(estimated);
 
-    // Seek to start
     video.pause();
     video.currentTime = 0;
 
-    // Wait for seek to complete
+    // Wait for seek
     await new Promise<void>(resolve => {
       const handler = () => { video.removeEventListener('seeked', handler); resolve(); };
       video.addEventListener('seeked', handler);
@@ -166,32 +164,29 @@ export default function BarbellTracker() {
     let calibrationAttempted = false;
 
     while (video.currentTime < duration && !analysisAbortRef.current) {
-      // Capture this frame
       const imageData = captureCurrentFrame();
 
       if (imageData) {
-        // ── Plate calibration — first few frames only ─────────────────────
+        // ── Plate calibration — first 90 frames only ──────────────────────
         if (!kinematicsRef.current.calibrationLocked && !calibrationAttempted) {
           const plateResult = await plateDetectorRef.current.detect(imageData);
           if (plateResult.length > 0) {
             updateCalibrationRef.current(plateResult);
             calibrationAttempted = true;
           }
-          // Try for first 90 frames (~3 seconds) before giving up
           if (frameIndex > 90) calibrationAttempted = true;
         }
 
-        // ── Barbell detection ─────────────────────────────────────────────
+        // ── Barbell detection — use VIDEO timestamp for determinism ────────
         const result = await detectorRef.current.detect(imageData);
         if (result.length > 0) {
-          updateKinematicsRef.current(result);
+          // video.currentTime is in seconds → convert to ms
+          updateWithTimestampRef.current(result, video.currentTime * 1000);
           renderCurrentFrame(result);
         }
       }
 
-      // Update progress
       frameIndex++;
-      analysisProgressRef.current = frameIndex;
       setAnalysisProgress(frameIndex);
 
       // Advance exactly one frame
@@ -200,16 +195,14 @@ export default function BarbellTracker() {
 
       video.currentTime = nextTime;
 
-      // Wait for seek to complete
+      // Wait for seek
       await new Promise<void>(resolve => {
         const handler = () => { video.removeEventListener('seeked', handler); resolve(); };
         video.addEventListener('seeked', handler);
-        // Timeout fallback in case seeked doesn't fire
-        setTimeout(resolve, 100);
+        setTimeout(resolve, 100); // fallback
       });
     }
 
-    // Analysis complete
     if (!analysisAbortRef.current) {
       setAnalysisState('complete');
       const reps = kinematicsRef.current.repHistory;
@@ -233,8 +226,8 @@ export default function BarbellTracker() {
   const loop = useCallback(() => {
     if (!isRunningRef.current) return;
 
-    const video   = videoRef.current;
-    const overlay = overlayCanvasRef.current;
+    const video     = videoRef.current;
+    const overlay   = overlayCanvasRef.current;
     const offscreen = offscreenCanvasRef.current;
 
     if (video && video.ended) {
@@ -251,7 +244,7 @@ export default function BarbellTracker() {
         ctx.drawImage(video, 0, 0);
         const imageData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
 
-        // Barbell detection
+        // Barbell — tracking with wall clock time
         if (!inferenceInFlightRef.current && detectorRef.current.status === 'ready') {
           inferenceInFlightRef.current = true;
           detectorRef.current.detect(imageData).then((result) => {
@@ -263,7 +256,7 @@ export default function BarbellTracker() {
           });
         }
 
-        // Plate calibration — once only
+        // Plate — calibration once only
         if (
           !plateInFlightRef.current &&
           !kinematicsRef.current.calibrationLocked &&
@@ -409,7 +402,9 @@ export default function BarbellTracker() {
 
   const modelsReady   = detector.status === 'ready' && plateDetector.status === 'ready';
   const modelsLoading = detector.status === 'loading' || plateDetector.status === 'loading';
-  const progressPct   = totalFrames > 0 ? Math.min(100, (analysisProgress / totalFrames) * 100) : 0;
+  const progressPct   = totalFrames > 0
+    ? Math.min(100, (analysisProgress / totalFrames) * 100)
+    : 0;
 
   return (
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
@@ -418,10 +413,10 @@ export default function BarbellTracker() {
       {/* Status */}
       {!setComplete && (
         <div className="flex gap-3 text-sm flex-wrap justify-center">
-          <StatusBadge label="Barbell" value={detector.status} ok={detector.status === 'ready'} />
-          <StatusBadge label="Plate"   value={plateDetector.status} ok={plateDetector.status === 'ready'} />
+          <StatusBadge label="Barbell" value={detector.status}       ok={detector.status === 'ready'} />
+          <StatusBadge label="Plate"   value={plateDetector.status}  ok={plateDetector.status === 'ready'} />
           <StatusBadge label="Camera"  value={webcam.isReady ? 'ready' : 'off'} ok={webcam.isReady} />
-          <StatusBadge label="FPS"     value={fps.toString()} ok={fps > 5} />
+          <StatusBadge label="FPS"     value={fps.toString()}        ok={fps > 5} />
           <div className={`px-3 py-1 rounded-full text-xs font-mono border
             ${kinematics.calibrationLocked
               ? 'border-green-700 text-green-400'
@@ -433,7 +428,7 @@ export default function BarbellTracker() {
         </div>
       )}
 
-      {/* ── Set complete summary ────────────────────────────────────────────── */}
+      {/* ── Set complete summary ───────────────────────────────────────────── */}
       {setComplete && completedReps.length > 0 ? (
         <div className="w-full max-w-xl flex flex-col gap-4">
 
@@ -610,7 +605,7 @@ export default function BarbellTracker() {
                   />
                 </div>
                 <div className="text-white text-xs font-mono">
-                  Analysing frame {analysisProgress} / ~{totalFrames} ({progressPct.toFixed(0)}%)
+                  Frame {analysisProgress} / ~{totalFrames} ({progressPct.toFixed(0)}%)
                 </div>
               </div>
             )}
@@ -709,10 +704,9 @@ export default function BarbellTracker() {
                 </div>
               )}
 
-              {/* Note — no playback speed since we process frame by frame */}
               {uploadedVideo && analysisState === 'idle' && (
                 <p className="text-xs text-slate-500 text-center">
-                  Frame-by-frame analysis — every frame processed in order for consistent results
+                  Frame-by-frame analysis — deterministic results every run
                 </p>
               )}
             </div>
