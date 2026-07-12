@@ -31,6 +31,16 @@ export const DEFAULT_CONFIG: ModelConfig = {
   scoreThreshold: 0.45, // ← raise from 0.25 to 0.45
 };
 
+export const PLATE_CONFIG: ModelConfig = {
+  modelPath: '/models/plate.onnx',
+  nmsPath: '',
+  inputWidth: 320,
+  inputHeight: 320,
+  topK: 3,             // ← keep top 3 plates for better calibration
+  iouThreshold: 0.45,
+  scoreThreshold: 0.35,
+};
+
 export function preprocessFrame(
   imageData: ImageData,
   modelWidth: number,
