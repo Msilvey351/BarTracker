@@ -21,6 +21,7 @@ export interface KinematicsState {
   repCount: number;
   phase: 'idle' | 'concentric' | 'eccentric';
   pixelsPerMetre: number | null;
+  calibrationLocked: boolean;
   concentricStartTime: number | null;
   concentricPositions: BarPosition[];
   eccentricPositions: BarPosition[];
@@ -36,6 +37,7 @@ export const INITIAL_STATE: KinematicsState = {
   repCount: 0,
   phase: 'idle',
   pixelsPerMetre: null,
+  calibrationLocked: false,
   concentricStartTime: null,
   concentricPositions: [],
   eccentricPositions: [],
@@ -49,7 +51,8 @@ export function calibrateFromPlate(plateBboxHeightPx: number): number {
   return plateBboxHeightPx / PLATE_DIAMETER_METRES;
 }
 
-const VELOCITY_WINDOW = 5;
+// ── Velocity window — larger = smoother but slower to react ──────────────────
+const VELOCITY_WINDOW = 8;
 
 export function computeVelocity(
   positions: BarPosition[],
@@ -72,12 +75,11 @@ export function computeVelocity(
 }
 
 // ── Phase detection constants ─────────────────────────────────────────────────
-const DIRECTION_FRAMES    = 10;   // frames to check for consistent direction
-const MIN_CONSISTENCY     = 0.7;  // 70% of frames must agree on direction
-const MIN_TRAVEL_METRES   = 0.10; // 10cm minimum travel to start a phase
-const MIN_REP_DURATION_MS = 100;  // minimum 0.1s for a valid concentric
+const DIRECTION_FRAMES    = 10;
+const MIN_CONSISTENCY     = 0.7;
+const MIN_TRAVEL_METRES   = 0.10;
+const MIN_REP_DURATION_MS = 100;
 
-// ── Calculate average velocity over a set of positions ────────────────────────
 function calcPhaseVelocity(
   positions: BarPosition[],
   pixelsPerMetre: number
@@ -110,29 +112,6 @@ function calcPeakVelocity(
     if (v > peak) peak = v;
   }
   return Math.min(peak, 3.0);
-}
-
-// ── Direction helper ──────────────────────────────────────────────────────────
-function getDirectionConsistency(recent: BarPosition[]): {
-  upConsistency: number;
-  downConsistency: number;
-  dyMetres: number;
-} {
-  if (recent.length < 2) return { upConsistency: 0, downConsistency: 0, dyMetres: 0 };
-
-  let upFrames = 0;
-  let downFrames = 0;
-
-  for (let i = 1; i < recent.length; i++) {
-    if (recent[i].y < recent[i - 1].y) upFrames++;
-    else if (recent[i].y > recent[i - 1].y) downFrames++;
-  }
-
-  const totalFrames = upFrames + downFrames;
-  const upConsistency   = totalFrames > 0 ? upFrames   / totalFrames : 0;
-  const downConsistency = totalFrames > 0 ? downFrames / totalFrames : 0;
-
-  return { upConsistency, downConsistency, dyMetres: 0 };
 }
 
 export function detectRep(
@@ -172,11 +151,9 @@ export function detectRep(
   const first = recent[0];
   const last = recent[recent.length - 1];
 
-  // Total displacement over window
-  const dyMetres = (last.y - first.y) / pixelsPerMetre; // negative = up, positive = down
+  const dyMetres = (last.y - first.y) / pixelsPerMetre;
   const dyAbsMetres = Math.abs(dyMetres);
 
-  // Direction consistency
   let upFrames = 0;
   let downFrames = 0;
   for (let i = 1; i < recent.length; i++) {
@@ -187,7 +164,6 @@ export function detectRep(
   const upConsistency   = totalFrames > 0 ? upFrames   / totalFrames : 0;
   const downConsistency = totalFrames > 0 ? downFrames / totalFrames : 0;
 
-  // Is the bar moving consistently up or down?
   const isSustainedUp   = dyMetres < -MIN_TRAVEL_METRES && upConsistency   >= MIN_CONSISTENCY;
   const isSustainedDown = dyMetres >  MIN_TRAVEL_METRES && downConsistency >= MIN_CONSISTENCY;
   const isStationary    = dyAbsMetres < 0.02;
@@ -206,14 +182,11 @@ export function detectRep(
 
     case 'idle': {
       if (isSustainedUp) {
-        // ── Concentric starts ───────────────────────────────────────────────
         phase = 'concentric';
         newConcentricStartTime = now;
-        newConcentricPositions = [...recent]; // seed with recent positions
+        newConcentricPositions = [...recent];
         newPeakVelocity = 0;
-
       } else if (isSustainedDown) {
-        // ── Eccentric starts from idle (e.g. lowering before first rep) ────
         phase = 'eccentric';
         newEccentricPositions = [...recent];
       }
@@ -221,16 +194,13 @@ export function detectRep(
     }
 
     case 'concentric': {
-      // Accumulate positions and peak velocity
       newConcentricPositions = [...concentricPositions, latestPos];
       newPeakVelocity = Math.max(currentRepPeakVelocity, currentVelocity);
 
       if (isStationary || isSustainedDown) {
-        // ── Concentric ends ─────────────────────────────────────────────────
         const concentricDuration = concentricStartTime ? now - concentricStartTime : 0;
 
         if (concentricDuration >= MIN_REP_DURATION_MS && newConcentricPositions.length >= 2) {
-          // Valid rep — calculate stats
           const {
             avgVelocity: concAvg,
             distance: concDist,
@@ -240,19 +210,16 @@ export function detectRep(
           const peakV = calcPeakVelocity(newConcentricPositions, pixelsPerMetre);
 
           repCount += 1;
-
-          const newRep: RepStats = {
+          newRepHistory = [...repHistory, {
             repNumber: repCount,
             concentricVelocity: concAvg,
-            eccentricVelocity: 0,       // filled in when eccentric ends
+            eccentricVelocity: 0,
             peakVelocity: peakV,
             concentricDistance: concDist,
             concentricDuration: concDur,
-          };
-          newRepHistory = [...repHistory, newRep];
+          }];
         }
 
-        // Transition to correct next phase
         if (isSustainedDown) {
           phase = 'eccentric';
           newEccentricPositions = [...recent];
@@ -268,18 +235,14 @@ export function detectRep(
     }
 
     case 'eccentric': {
-      // Accumulate eccentric positions
       newEccentricPositions = [...eccentricPositions, latestPos];
 
       if (isStationary || isSustainedUp) {
-        // ── Eccentric ends ──────────────────────────────────────────────────
         if (newEccentricPositions.length >= 2 && newRepHistory.length > 0) {
           const { avgVelocity: eccAvg } = calcPhaseVelocity(
             newEccentricPositions,
             pixelsPerMetre
           );
-
-          // Update the last rep with eccentric velocity
           const updatedHistory = [...newRepHistory];
           updatedHistory[updatedHistory.length - 1] = {
             ...updatedHistory[updatedHistory.length - 1],
@@ -290,7 +253,6 @@ export function detectRep(
 
         newEccentricPositions = [];
 
-        // Transition to correct next phase
         if (isSustainedUp) {
           phase = 'concentric';
           newConcentricStartTime = now;
@@ -319,12 +281,8 @@ export function updateKinematics(
   state: KinematicsState,
   newPos: { x: number; y: number },
   timestamp: number,
-  plateBboxHeightPx?: number
 ): KinematicsState {
-  let pixelsPerMetre = state.pixelsPerMetre;
-  if (!pixelsPerMetre && plateBboxHeightPx && plateBboxHeightPx > 10) {
-    pixelsPerMetre = calibrateFromPlate(plateBboxHeightPx);
-  }
+  const { pixelsPerMetre, calibrationLocked } = state;
 
   const newBarPos: BarPosition = { ...newPos, timestamp };
   const positions = [...state.positions, newBarPos].slice(-60);
@@ -364,11 +322,37 @@ export function updateKinematics(
     repCount:               result.repCount,
     phase:                  result.phase,
     pixelsPerMetre,
+    calibrationLocked,
     concentricStartTime:    result.concentricStartTime,
     concentricPositions:    result.concentricPositions,
     eccentricPositions:     result.eccentricPositions,
     repHistory:             result.repHistory,
     currentRepPeakVelocity: result.currentRepPeakVelocity,
+  };
+}
+
+// ── Called once with plate detection — locks calibration immediately ──────────
+export function applyCalibration(
+  state: KinematicsState,
+  plateDetections: Array<{ height: number; score: number }>
+): KinematicsState {
+  // Already locked — never update again
+  if (state.calibrationLocked) return state;
+
+  // Find largest plate detection
+  const best = plateDetections
+    .filter(d => d.height > 20 && d.height < 800)
+    .sort((a, b) => b.height - a.height)[0];
+
+  if (!best) return state;
+
+  const pixelsPerMetre = calibrateFromPlate(best.height);
+  console.log(`✅ Calibration locked: ${best.height.toFixed(0)}px = 0.45m → ${pixelsPerMetre.toFixed(0)} px/m`);
+
+  return {
+    ...state,
+    pixelsPerMetre,
+    calibrationLocked: true,  // never changes again this session
   };
 }
 
@@ -386,5 +370,11 @@ export function resetSet(state: KinematicsState): KinematicsState {
     eccentricPositions:     [],
     repHistory:             [],
     currentRepPeakVelocity: 0,
+    // NOTE: pixelsPerMetre and calibrationLocked are preserved across sets
   };
+}
+
+// ── Full reset including calibration — call between different videos ──────────
+export function fullReset(): KinematicsState {
+  return { ...INITIAL_STATE };
 }

@@ -29,6 +29,8 @@ export default function BarbellTracker() {
     update: updateKinematics,
     updateCalibration,
     reset: resetKinematics,
+    resetAll,
+    setCalibration,
   } = useKinematics();
 
   const [mode, setMode] = useState<Mode>('camera');
@@ -39,6 +41,7 @@ export default function BarbellTracker() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [setComplete, setSetComplete] = useState(false);
   const [completedReps, setCompletedReps] = useState<RepStats[]>([]);
+  const [manualCal, setManualCal] = useState<string>('');
 
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
@@ -122,10 +125,10 @@ export default function BarbellTracker() {
           });
         }
 
-        // ── Plate detection — calibration only, stops once calibrated ─────
+        // ── Plate detection — ONE TIME calibration only ───────────────────
         if (
           !plateInFlightRef.current &&
-          !kinematicsRef.current.pixelsPerMetre &&
+          !kinematicsRef.current.calibrationLocked &&
           plateDetectorRef.current.status === 'ready'
         ) {
           plateInFlightRef.current = true;
@@ -192,12 +195,13 @@ export default function BarbellTracker() {
     setVideoReady(false);
     setSetComplete(false);
     setCompletedReps([]);
-    resetKinematics();
+    // Full reset on new video — clears calibration too
+    resetAll();
     if (videoRef.current) {
       videoRef.current.src = url;
       videoRef.current.load();
     }
-  }, [uploadedVideo, resetKinematics]);
+  }, [uploadedVideo, resetAll]);
 
   const startVideoAnalysis = useCallback(() => {
     const video = videoRef.current;
@@ -212,8 +216,10 @@ export default function BarbellTracker() {
     setIsTracking(true);
     setSetComplete(false);
     setCompletedReps([]);
+    // Full reset including calibration when starting fresh analysis
+    resetAll();
     animFrameRef.current = requestAnimationFrame(loop);
-  }, [videoReady, playbackSpeed, loop]);
+  }, [videoReady, playbackSpeed, loop, resetAll]);
 
   const pauseVideoAnalysis = useCallback(() => {
     videoRef.current?.pause();
@@ -222,11 +228,11 @@ export default function BarbellTracker() {
     setIsTracking(false);
   }, []);
 
-  // ── New set ───────────────────────────────────────────────────────────────
+  // ── New set — keep calibration, reset stats ───────────────────────────────
   const startNewSet = useCallback(() => {
     setSetComplete(false);
     setCompletedReps([]);
-    resetKinematics();
+    resetKinematics();  // keeps calibration
     lastDetectionsRef.current = [];
     inferenceInFlightRef.current = false;
     plateInFlightRef.current = false;
@@ -242,7 +248,7 @@ export default function BarbellTracker() {
       videoRef.current.src = '';
       videoRef.current.srcObject = null;
     }
-    resetKinematics();
+    resetAll();
     setMode(newMode);
     setVideoReady(false);
     setSetComplete(false);
@@ -250,12 +256,19 @@ export default function BarbellTracker() {
     inferenceInFlightRef.current = false;
     plateInFlightRef.current = false;
     lastDetectionsRef.current = [];
-  }, [resetKinematics]);
+  }, [resetAll]);
 
   const handleSpeedChange = useCallback((speed: number) => {
     setPlaybackSpeed(speed);
     if (videoRef.current) videoRef.current.playbackRate = speed;
   }, []);
+
+  // ── Manual calibration ────────────────────────────────────────────────────
+  const applyManualCal = useCallback(() => {
+    const val = parseFloat(manualCal);
+    if (isNaN(val) || val <= 0) return;
+    setCalibration(val);
+  }, [manualCal, setCalibration]);
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -275,25 +288,36 @@ export default function BarbellTracker() {
     : null;
   const velocityLoss = bestRep && completedReps.length > 1
     ? (() => {
-        const worst = completedReps.reduce((a, b) => a.concentricVelocity < b.concentricVelocity ? a : b);
+        const worst = completedReps.reduce((a, b) =>
+          a.concentricVelocity < b.concentricVelocity ? a : b
+        );
         return (bestRep.concentricVelocity - worst.concentricVelocity) / bestRep.concentricVelocity * 100;
       })()
     : 0;
 
-  const modelsReady = detector.status === 'ready' && plateDetector.status === 'ready';
+  const modelsReady  = detector.status === 'ready' && plateDetector.status === 'ready';
   const modelsLoading = detector.status === 'loading' || plateDetector.status === 'loading';
 
   return (
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
       <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
 
-      {/* Status — hide when set complete */}
+      {/* Status */}
       {!setComplete && (
         <div className="flex gap-3 text-sm flex-wrap justify-center">
           <StatusBadge label="Barbell" value={detector.status} ok={detector.status === 'ready'} />
           <StatusBadge label="Plate" value={plateDetector.status} ok={plateDetector.status === 'ready'} />
           <StatusBadge label="Camera" value={webcam.isReady ? 'ready' : 'off'} ok={webcam.isReady} />
           <StatusBadge label="FPS" value={fps.toString()} ok={fps > 5} />
+          {/* Calibration status */}
+          <div className={`px-3 py-1 rounded-full text-xs font-mono border
+            ${kinematics.calibrationLocked
+              ? 'border-green-700 text-green-400'
+              : 'border-orange-700 text-orange-400'}`}>
+            CAL: {kinematics.calibrationLocked
+              ? `${kinematics.pixelsPerMetre!.toFixed(0)} px/m 🔒`
+              : 'awaiting...'}
+          </div>
         </div>
       )}
 
@@ -305,6 +329,11 @@ export default function BarbellTracker() {
             <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
             <div className="text-slate-400 text-sm">
               {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
+              {kinematics.calibrationLocked && (
+                <span className="ml-2 text-slate-500">
+                  · CAL {kinematics.pixelsPerMetre!.toFixed(0)} px/m
+                </span>
+              )}
             </div>
           </div>
 
@@ -416,6 +445,32 @@ export default function BarbellTracker() {
             >
               📁 Upload Video
             </button>
+          </div>
+
+          {/* Manual calibration override */}
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-slate-400 text-xs">Manual cal (px/m):</span>
+            <input
+              type="number"
+              value={manualCal}
+              onChange={(e) => setManualCal(e.target.value)}
+              placeholder="e.g. 400"
+              className="w-24 px-2 py-1 rounded bg-slate-800 border border-slate-600 text-white text-xs font-mono"
+            />
+            <button
+              onClick={applyManualCal}
+              className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs"
+            >
+              Apply
+            </button>
+            {kinematics.calibrationLocked && (
+              <button
+                onClick={resetAll}
+                className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs text-orange-400"
+              >
+                🔓 Unlock
+              </button>
+            )}
           </div>
 
           {/* Video */}
@@ -534,7 +589,7 @@ export default function BarbellTracker() {
                       : isTracking ? '⏸ Pause' : '▶ Analyse Video'}
                   </button>
                   <button
-                    onClick={resetKinematics}
+                    onClick={() => { resetAll(); }}
                     className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
                   >
                     🔄 Reset
