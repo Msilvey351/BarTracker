@@ -22,7 +22,7 @@ export interface ModelConfig {
 }
 
 export const DEFAULT_CONFIG: ModelConfig = {
-  modelPath: '/models/plate.onnx',
+  modelPath: '/models/barbell.onnx',
   nmsPath: '',
   inputWidth: 320,
   inputHeight: 320,
