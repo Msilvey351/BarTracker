@@ -55,7 +55,7 @@ const VELOCITY_WINDOW = 8;
 
 // ── Option A — Maximum position jump filter ───────────────────────────────────
 // If bar teleports more than this between frames it's a detection glitch
-const MAX_JUMP_PX = 150;
+const MAX_JUMP_PX = 240;
 
 // ── Option B — Minimum detection score ───────────────────────────────────────
 // Only positions from high-confidence detections are used
