@@ -1,31 +1,37 @@
-import type { Detection } from './detector';
+// lib/renderer.ts
 import type { KinematicsState } from './kinematics';
 
 const PHASE_COLOURS = {
-  idle: '#94a3b8',
-  concentric: '#22c55e',
-  eccentric: '#f97316',
+  idle:        '#94a3b8',
+  concentric:  '#22c55e',
+  eccentric:   '#f97316',
 };
 
 export interface RenderOptions {
-  showDetectionBox: boolean;
-  showBarPath: boolean;
-  showHUD: boolean;
+  showTrackedPoint:      boolean;
+  showBarPath:           boolean;
+  showHUD:               boolean;
   showCalibrationStatus: boolean;
 }
 
 export const DEFAULT_RENDER_OPTIONS: RenderOptions = {
-  showDetectionBox: true,
-  showBarPath: true,
-  showHUD: true,
+  showTrackedPoint:      true,
+  showBarPath:           true,
+  showHUD:               true,
   showCalibrationStatus: true,
 };
+
+export interface TrackedPointDisplay {
+  x: number;
+  y: number;
+  tracked: boolean;
+}
 
 export function renderFrame(
   canvas: HTMLCanvasElement,
   displayW: number,
   displayH: number,
-  detections: Detection[],
+  trackedPoint: TrackedPointDisplay | null,
   kinematics: KinematicsState,
   options: RenderOptions = DEFAULT_RENDER_OPTIONS,
   scale: number = 1,
@@ -40,18 +46,7 @@ export function renderFrame(
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Scale detections to display coordinates
-  const scaledDetections = detections.map(d => ({
-    ...d,
-    x:       d.x       * scale + offsetX,
-    y:       d.y       * scale + offsetY,
-    width:   d.width   * scale,
-    height:  d.height  * scale,
-    centerX: d.centerX * scale + offsetX,
-    centerY: d.centerY * scale + offsetY,
-  }));
-
-  // Scale bar path to display coordinates
+  // Scale bar path to display coords
   const scaledKinematics = {
     ...kinematics,
     barPath: kinematics.barPath.map(p => ({
@@ -61,12 +56,78 @@ export function renderFrame(
     })),
   };
 
-  if (options.showBarPath) drawBarPath(ctx, scaledKinematics);
-  if (options.showDetectionBox) drawDetections(ctx, scaledDetections, kinematics.phase);
-  if (options.showHUD) drawHUD(ctx, kinematics, canvas.width, canvas.height);
+  if (options.showBarPath)           drawBarPath(ctx, scaledKinematics);
+  if (options.showTrackedPoint && trackedPoint) {
+    drawTrackedPoint(
+      ctx,
+      trackedPoint.x * scale + offsetX,
+      trackedPoint.y * scale + offsetY,
+      trackedPoint.tracked,
+      kinematics.phase,
+    );
+  }
+  if (options.showHUD)               drawHUD(ctx, kinematics, canvas.width, canvas.height);
   if (options.showCalibrationStatus) drawCalibrationBadge(ctx, kinematics);
 }
 
+// ── Tracked point ─────────────────────────────────────────────────────────────
+function drawTrackedPoint(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  tracked: boolean,
+  phase: KinematicsState['phase'],
+) {
+  ctx.save();
+
+  const colour = tracked ? PHASE_COLOURS[phase] : '#ef4444';
+  const radius = 10;
+
+  // Outer glow ring
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner solid circle
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  // White centre dot
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Crosshair lines
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.8;
+  const arm = 20;
+  ctx.beginPath();
+  ctx.moveTo(x - arm, y); ctx.lineTo(x + arm, y);
+  ctx.moveTo(x, y - arm); ctx.lineTo(x, y + arm);
+  ctx.stroke();
+
+  // Lost indicator
+  if (!tracked) {
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y - 8); ctx.lineTo(x + 8, y + 8);
+    ctx.moveTo(x + 8, y - 8); ctx.lineTo(x - 8, y + 8);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ── Bar path trail ────────────────────────────────────────────────────────────
 function drawBarPath(ctx: CanvasRenderingContext2D, k: KinematicsState) {
   const path = k.barPath;
   if (path.length < 2) return;
@@ -91,50 +152,21 @@ function drawBarPath(ctx: CanvasRenderingContext2D, k: KinematicsState) {
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#3b82f6';
     ctx.beginPath();
-    ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
+    ctx.arc(last.x, last.y, 4, 0, Math.PI * 2);
     ctx.fill();
   }
 
   ctx.restore();
 }
 
-function drawDetections(
-  ctx: CanvasRenderingContext2D,
-  detections: Detection[],
-  phase: KinematicsState['phase']
-) {
-  const phaseColour = PHASE_COLOURS[phase];
-
-  for (const det of detections) {
-    const { x, y, width, height, score } = det;
-
-    ctx.save();
-    ctx.strokeStyle = '#facc15';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, width, height);
-
-    ctx.strokeStyle = phaseColour;
-    ctx.lineWidth = 3;
-    const cLen = Math.min(width, height) * 0.2;
-    ctx.beginPath(); ctx.moveTo(x, y + cLen); ctx.lineTo(x, y); ctx.lineTo(x + cLen, y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x + width - cLen, y); ctx.lineTo(x + width, y); ctx.lineTo(x + width, y + cLen); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x + width, y + height - cLen); ctx.lineTo(x + width, y + height); ctx.lineTo(x + width - cLen, y + height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x + cLen, y + height); ctx.lineTo(x, y + height); ctx.lineTo(x, y + height - cLen); ctx.stroke();
-
-    ctx.fillStyle = '#facc15';
-    ctx.font = 'bold 12px monospace';
-    ctx.fillText(`${(score * 100).toFixed(0)}%`, x + 4, y - 5);
-    ctx.restore();
-  }
-}
-
+// ── HUD ───────────────────────────────────────────────────────────────────────
 function drawHUD(
   ctx: CanvasRenderingContext2D,
   k: KinematicsState,
   canvasW: number,
-  _canvasH: number
+  _canvasH: number,
 ) {
-  const pad = 16;
+  const pad    = 16;
   const panelW = 200;
   const panelH = 140;
   const panelX = canvasW - panelW - pad;
@@ -152,7 +184,9 @@ function drawHUD(
   ctx.font = 'bold 11px monospace';
   ctx.fillText('BARBELL TRACKER', panelX + pad, panelY + 20);
 
-  const velColour = k.velocity > 0.5 ? '#22c55e' : k.velocity > 0.3 ? '#facc15' : '#f87171';
+  const velColour = k.velocity > 0.5 ? '#22c55e'
+    : k.velocity > 0.3 ? '#facc15'
+    : '#f87171';
   ctx.fillStyle = velColour;
   ctx.font = 'bold 28px monospace';
   ctx.fillText(
@@ -178,6 +212,7 @@ function drawHUD(
   ctx.restore();
 }
 
+// ── Calibration badge ─────────────────────────────────────────────────────────
 function drawCalibrationBadge(ctx: CanvasRenderingContext2D, k: KinematicsState) {
   const calibrated = !!k.pixelsPerMetre;
   ctx.save();
@@ -190,7 +225,9 @@ function drawCalibrationBadge(ctx: CanvasRenderingContext2D, k: KinematicsState)
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 11px monospace';
   ctx.fillText(
-    calibrated ? `✓ CAL ${k.pixelsPerMetre!.toFixed(0)}px/m` : '⚠ AWAITING CALIBRATION',
+    calibrated
+      ? `✓ CAL ${k.pixelsPerMetre!.toFixed(0)}px/m`
+      : '⚠ AWAITING CALIBRATION',
     20, 30
   );
   ctx.restore();
