@@ -1,9 +1,6 @@
 // @ts-nocheck
 // workers/tracker.worker.ts
 
-// Do NOT import cv at module level — load it dynamically
-// This prevents Turbopack from trying to bundle it
-
 let cv: any = null;
 let prevGray:   any = null;
 let prevPoints: any = null;
@@ -14,26 +11,57 @@ const TERM_CRITERIA_EPS   = 0x01;
 const TERM_CRITERIA_COUNT = 0x02;
 const TERM_CRITERIA_BOTH  = TERM_CRITERIA_EPS | TERM_CRITERIA_COUNT;
 
-// Load OpenCV dynamically using importScripts (works in Web Workers)
-// This bypasses the bundler entirely
+// ── Load OpenCV ───────────────────────────────────────────────────────────────
 try {
+  console.log('[tracker.worker] Loading opencv.js...');
   importScripts('/opencv.js');
-  // cv is now available as a global
+  console.log('[tracker.worker] importScripts completed');
+  console.log('[tracker.worker] self.cv exists:', typeof self.cv);
+
   cv = self.cv;
-  if (cv?.onRuntimeInitialized !== undefined) {
-    if (cv.Mat) {
-      // Already initialised
+
+  if (!cv) {
+    throw new Error('cv is undefined after importScripts');
+  }
+
+  // cv may already be initialised or may need to wait
+  if (cv.Mat) {
+    // Already ready
+    console.log('[tracker.worker] OpenCV already initialised');
+    cvReady = true;
+    self.postMessage({ type: 'ready' });
+  } else if (typeof cv.onRuntimeInitialized !== 'undefined') {
+    console.log('[tracker.worker] Waiting for onRuntimeInitialized...');
+    cv.onRuntimeInitialized = () => {
+      console.log('[tracker.worker] OpenCV initialised!');
       cvReady = true;
       self.postMessage({ type: 'ready' });
-    } else {
-      cv.onRuntimeInitialized = () => {
+    };
+  } else {
+    // Poll for readiness as fallback
+    console.log('[tracker.worker] Polling for cv.Mat...');
+    const poll = setInterval(() => {
+      if (cv && cv.Mat) {
+        console.log('[tracker.worker] OpenCV ready via polling');
+        clearInterval(poll);
         cvReady = true;
         self.postMessage({ type: 'ready' });
-      };
-    }
+      }
+    }, 100);
+
+    // Timeout after 30s
+    setTimeout(() => {
+      if (!cvReady) {
+        clearInterval(poll);
+        console.error('[tracker.worker] OpenCV timed out after 30s');
+        self.postMessage({ type: 'error', payload: 'OpenCV load timeout' });
+      }
+    }, 30000);
   }
-} catch (e) {
-  self.postMessage({ type: 'error', payload: `Failed to load OpenCV: ${e}` });
+
+} catch (err) {
+  console.error('[tracker.worker] Failed to load opencv:', err);
+  self.postMessage({ type: 'error', payload: `Failed to load OpenCV: ${String(err)}` });
 }
 
 function imageDataToGray(imageData: ImageData): any {
@@ -54,7 +82,6 @@ self.onmessage = (e: MessageEvent) => {
 
   const { type, payload } = e.data;
 
-  // ── Seed ─────────────────────────────────────────────────────────────────
   if (type === 'seed') {
     try {
       if (prevGray)   { prevGray.delete();   prevGray   = null; }
@@ -72,7 +99,6 @@ self.onmessage = (e: MessageEvent) => {
     }
   }
 
-  // ── Track ─────────────────────────────────────────────────────────────────
   if (type === 'track' && isReady && prevGray && prevPoints) {
     const currGray   = imageDataToGray(payload.imageData);
     const currPoints = new cv.Mat();
@@ -97,12 +123,10 @@ self.onmessage = (e: MessageEvent) => {
       if (tracked) {
         const x = currPoints.data32F[0];
         const y = currPoints.data32F[1];
-
         prevGray.delete();
         prevGray = currGray;
         prevPoints.delete();
         prevPoints = currPoints.clone();
-
         self.postMessage({
           type: 'tracked',
           payload: { x, y, tracked: true, videoTimestamp: payload.videoTimestamp },
@@ -110,7 +134,6 @@ self.onmessage = (e: MessageEvent) => {
       } else {
         prevGray.delete();
         prevGray = currGray;
-
         self.postMessage({
           type: 'tracked',
           payload: { x: 0, y: 0, tracked: false, videoTimestamp: payload.videoTimestamp },
@@ -129,7 +152,6 @@ self.onmessage = (e: MessageEvent) => {
     }
   }
 
-  // ── Reset ─────────────────────────────────────────────────────────────────
   if (type === 'reset') {
     try { if (prevGray)   prevGray.delete();   } catch (_) {}
     try { if (prevPoints) prevPoints.delete(); } catch (_) {}
