@@ -13,19 +13,16 @@ type Mode = 'camera' | 'upload';
 type AnalysisState = 'idle' | 'analysing' | 'complete';
 
 export default function BarbellTracker() {
-  const videoRef          = useRef<HTMLVideoElement>(null);
-  const overlayCanvasRef  = useRef<HTMLCanvasElement>(null);
+  const videoRef           = useRef<HTMLVideoElement>(null);
+  const overlayCanvasRef   = useRef<HTMLCanvasElement>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Camera loop refs
-  const animFrameRef        = useRef<number>(0);
-  const isRunningRef        = useRef(false);
-  const plateInFlightRef    = useRef(false);
-  const trackInFlightRef    = useRef(false);
-  const lastPointRef        = useRef<{ x: number; y: number; tracked: boolean } | null>(null);
-
-  // Frame-by-frame refs
-  const analysisAbortRef    = useRef(false);
+  const animFrameRef     = useRef<number>(0);
+  const isRunningRef     = useRef(false);
+  const plateInFlightRef = useRef(false);
+  const trackInFlightRef = useRef(false);
+  const lastPointRef     = useRef<{ x: number; y: number; tracked: boolean } | null>(null);
+  const analysisAbortRef = useRef(false);
 
   const webcam        = useWebcam(videoRef);
   const tracker       = useTracker();
@@ -40,36 +37,35 @@ export default function BarbellTracker() {
     setCalibration,
   } = useKinematics();
 
-  const [mode, setMode]                   = useState<Mode>('camera');
-  const [isTracking, setIsTracking]       = useState(false);
-  const [fps, setFps]                     = useState(0);
-  const [uploadedVideo, setUploadedVideo] = useState<string | null>(null);
-  const [videoReady, setVideoReady]       = useState(false);
-  const [setComplete, setSetComplete]     = useState(false);
-  const [completedReps, setCompletedReps] = useState<RepStats[]>([]);
-  const [manualCal, setManualCal]         = useState<string>('');
-  const [analysisState, setAnalysisState] = useState<AnalysisState>('idle');
+  const [mode, setMode]                         = useState<Mode>('camera');
+  const [isTracking, setIsTracking]             = useState(false);
+  const [fps, setFps]                           = useState(0);
+  const [uploadedVideo, setUploadedVideo]       = useState<string | null>(null);
+  const [videoReady, setVideoReady]             = useState(false);
+  const [setComplete, setSetComplete]           = useState(false);
+  const [completedReps, setCompletedReps]       = useState<RepStats[]>([]);
+  const [manualCal, setManualCal]               = useState<string>('');
+  const [analysisState, setAnalysisState]       = useState<AnalysisState>('idle');
   const [analysisProgress, setAnalysisProgress] = useState(0);
-  const [totalFrames, setTotalFrames]     = useState(0);
-  const [isSeeded, setIsSeeded]           = useState(false);
-  const [showTapHint, setShowTapHint]     = useState(false);
+  const [totalFrames, setTotalFrames]           = useState(0);
+  const [isSeeded, setIsSeeded]                 = useState(false);
 
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
   // Stable refs
-  const kinematicsRef = useRef(kinematics);
+  const kinematicsRef          = useRef(kinematics);
   useEffect(() => { kinematicsRef.current = kinematics; }, [kinematics]);
-  const webcamRef = useRef(webcam);
+  const webcamRef              = useRef(webcam);
   useEffect(() => { webcamRef.current = webcam; }, [webcam]);
-  const trackerRef = useRef(tracker);
+  const trackerRef             = useRef(tracker);
   useEffect(() => { trackerRef.current = tracker; }, [tracker]);
-  const plateDetectorRef = useRef(plateDetector);
+  const plateDetectorRef       = useRef(plateDetector);
   useEffect(() => { plateDetectorRef.current = plateDetector; }, [plateDetector]);
-  const updateKinematicsRef = useRef(updateKinematics);
+  const updateKinematicsRef    = useRef(updateKinematics);
   useEffect(() => { updateKinematicsRef.current = updateKinematics; }, [updateKinematics]);
   const updateWithTimestampRef = useRef(updateWithTimestamp);
   useEffect(() => { updateWithTimestampRef.current = updateWithTimestamp; }, [updateWithTimestamp]);
-  const updateCalibrationRef = useRef(updateCalibration);
+  const updateCalibrationRef   = useRef(updateCalibration);
   useEffect(() => { updateCalibrationRef.current = updateCalibration; }, [updateCalibration]);
 
   useEffect(() => {
@@ -135,41 +131,45 @@ export default function BarbellTracker() {
     );
   }, [getDisplayOffset]);
 
-  // ── Handle tap on video overlay ───────────────────────────────────────────
-  const handleTap = useCallback(async (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
+  // ── Handle tap on video ───────────────────────────────────────────────────
+  const handleTap = useCallback(async (
+    e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>
+  ) => {
     const overlay = overlayCanvasRef.current;
     const video   = videoRef.current;
     if (!overlay || !video) return;
-    if (!isTracking && mode === 'camera') return;
+
+    // Only allow tap when camera is running or video is loaded
+    if (mode === 'camera' && !isTracking) return;
+    if (mode === 'upload' && !videoReady) return;
     if (analysisState === 'analysing') return;
 
-    // Get tap position relative to overlay
-    const rect = overlay.getBoundingClientRect();
+    // Tracker must be ready
+    const tStatus = trackerRef.current.status;
+    if (tStatus === 'idle' || tStatus === 'loading' || tStatus === 'error') return;
+
+    const rect    = overlay.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    const tapX = clientX - rect.left;
-    const tapY = clientY - rect.top;
+    const tapX    = clientX - rect.left;
+    const tapY    = clientY - rect.top;
 
-    // Convert display coords → video pixel coords
     const { scale, offsetX, offsetY } = getDisplayOffset();
     const videoX = (tapX - offsetX) / scale;
     const videoY = (tapY - offsetY) / scale;
 
-    // Clamp to video bounds
     const clampedX = Math.max(0, Math.min(video.videoWidth,  videoX));
     const clampedY = Math.max(0, Math.min(video.videoHeight, videoY));
 
-    // Capture current frame and seed tracker
     const imageData = captureFrame();
     if (!imageData) return;
 
     await trackerRef.current.seed(imageData, clampedX, clampedY);
     lastPointRef.current = { x: clampedX, y: clampedY, tracked: true };
     setIsSeeded(true);
-    setShowTapHint(false);
-  }, [isTracking, mode, analysisState, getDisplayOffset, captureFrame]);
+  }, [mode, isTracking, videoReady, analysisState, getDisplayOffset, captureFrame]);
 
-  // ── Camera animation loop ─────────────────────────────────────────────────
+  // ── Camera loop ───────────────────────────────────────────────────────────
   const loop = useCallback(() => {
     if (!isRunningRef.current) return;
 
@@ -182,28 +182,24 @@ export default function BarbellTracker() {
       const imageData = captureFrame();
 
       if (imageData) {
-        // ── Optical flow tracking ─────────────────────────────────────────
+        // Optical flow
         if (!trackInFlightRef.current && trackerRef.current.status === 'seeded') {
           trackInFlightRef.current = true;
           trackerRef.current.track(imageData, performance.now()).then((result) => {
             lastPointRef.current = result;
             if (result.tracked) {
               updateKinematicsRef.current([{
-                x:       result.x - 5,
-                y:       result.y - 5,
-                width:   10,
-                height:  10,
-                centerX: result.x,
-                centerY: result.y,
-                score:   1.0,
-                label:   0,
+                x: result.x - 5, y: result.y - 5,
+                width: 10, height: 10,
+                centerX: result.x, centerY: result.y,
+                score: 1.0, label: 0,
               }]);
             }
             trackInFlightRef.current = false;
           });
         }
 
-        // ── Plate calibration — once only ─────────────────────────────────
+        // Plate calibration — once only
         if (
           !plateInFlightRef.current &&
           !kinematicsRef.current.calibrationLocked &&
@@ -237,7 +233,6 @@ export default function BarbellTracker() {
     isRunningRef.current = true;
     setIsTracking(true);
     setIsSeeded(false);
-    setShowTapHint(true);
     setSetComplete(false);
     setCompletedReps([]);
     animFrameRef.current = requestAnimationFrame(loop);
@@ -247,7 +242,6 @@ export default function BarbellTracker() {
     isRunningRef.current = false;
     cancelAnimationFrame(animFrameRef.current);
     setIsTracking(false);
-    setShowTapHint(false);
   }, []);
 
   // ── Upload controls ───────────────────────────────────────────────────────
@@ -287,8 +281,7 @@ export default function BarbellTracker() {
     const videoFps  = 30;
     const frameTime = 1 / videoFps;
     const duration  = video.duration;
-    const estimated = Math.floor(duration * videoFps);
-    setTotalFrames(estimated);
+    setTotalFrames(Math.floor(duration * videoFps));
 
     video.pause();
     video.currentTime = 0;
@@ -298,24 +291,20 @@ export default function BarbellTracker() {
       video.addEventListener('seeked', h);
     });
 
-    let frameIndex = 0;
-    let calibrationAttempted = false;
-
-    // Re-seed tracker at frame 0
+    // Re-seed at frame 0
     const firstFrame = captureFrame();
     if (firstFrame && lastPointRef.current) {
-      await trackerRef.current.seed(
-        firstFrame,
-        lastPointRef.current.x,
-        lastPointRef.current.y
-      );
+      await trackerRef.current.seed(firstFrame, lastPointRef.current.x, lastPointRef.current.y);
     }
+
+    let frameIndex = 0;
+    let calibrationAttempted = false;
 
     while (video.currentTime < duration && !analysisAbortRef.current) {
       const imageData = captureFrame();
 
       if (imageData) {
-        // Plate calibration — first 90 frames only
+        // Calibration — first 90 frames only
         if (!kinematicsRef.current.calibrationLocked && !calibrationAttempted) {
           const plateResult = await plateDetectorRef.current.detect(imageData);
           if (plateResult.length > 0) {
@@ -325,26 +314,17 @@ export default function BarbellTracker() {
           if (frameIndex > 90) calibrationAttempted = true;
         }
 
-        // Optical flow tracking — use video timestamp
-        const result = await trackerRef.current.track(
-          imageData,
-          video.currentTime * 1000
-        );
-
+        // Track with video timestamp
+        const result = await trackerRef.current.track(imageData, video.currentTime * 1000);
         lastPointRef.current = result;
 
         if (result.tracked) {
           updateWithTimestampRef.current([{
-            x:       result.x - 5,
-            y:       result.y - 5,
-            width:   10,
-            height:  10,
-            centerX: result.x,
-            centerY: result.y,
-            score:   1.0,
-            label:   0,
+            x: result.x - 5, y: result.y - 5,
+            width: 10, height: 10,
+            centerX: result.x, centerY: result.y,
+            score: 1.0, label: 0,
           }], result.videoTimestamp);
-
           render();
         }
       }
@@ -414,7 +394,6 @@ export default function BarbellTracker() {
     setAnalysisState('idle');
     setAnalysisProgress(0);
     setIsSeeded(false);
-    setShowTapHint(false);
     lastPointRef.current = null;
     plateInFlightRef.current = false;
     trackInFlightRef.current = false;
@@ -458,11 +437,22 @@ export default function BarbellTracker() {
   const modelsLoading = !trackerReady || !plateReady;
   const progressPct   = totalFrames > 0 ? Math.min(100, (analysisProgress / totalFrames) * 100) : 0;
 
+  // Tap hint text shown below video
+  const tapHintText = () => {
+    if (tracker.status === 'lost') return { text: '⚠️ Tracking lost — tap on the bar to re-seed', colour: 'text-orange-400 bg-orange-950' };
+    if (isSeeded) return { text: `✅ Point set${mode === 'upload' ? ' — click Analyse Video' : ' — tracking active'}`, colour: 'text-green-400 bg-slate-800' };
+    if (mode === 'camera' && isTracking) return { text: '👆 Tap on the end of the bar to start tracking', colour: 'text-slate-300 bg-slate-800' };
+    if (mode === 'upload' && videoReady && analysisState === 'idle') return { text: '👆 Tap on the end of the bar to set tracking point, then click Analyse Video', colour: 'text-slate-300 bg-slate-800' };
+    return null;
+  };
+
+  const hint = tapHintText();
+
   return (
     <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
       <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
 
-      {/* Status */}
+      {/* Status badges */}
       {!setComplete && (
         <div className="flex gap-3 text-sm flex-wrap justify-center">
           <StatusBadge label="Tracker" value={tracker.status}       ok={trackerReady} />
@@ -628,9 +618,9 @@ export default function BarbellTracker() {
             )}
           </div>
 
-          {/* Video + tap overlay */}
+          {/* Video — clean, no overlay hints */}
           <div
-            className="relative rounded-xl overflow-hidden border border-slate-700 bg-black w-full"
+            className="relative rounded-xl overflow-hidden border border-slate-700 bg-black w-full cursor-crosshair"
             style={{ maxWidth: 720, aspectRatio: '16/9' }}
             onClick={handleTap}
             onTouchStart={handleTap}
@@ -648,44 +638,17 @@ export default function BarbellTracker() {
               style={{ pointerEvents: 'none' }}
             />
 
-            {/* Tap hint overlay */}
-            {showTapHint && !isSeeded && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="bg-black/60 rounded-xl px-6 py-4 text-center">
-                  <div className="text-3xl mb-2">👆</div>
-                  <div className="text-white font-semibold text-sm">
-                    Tap on the end of the bar to start tracking
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Analysis progress */}
+            {/* Progress bar only — no tap hints inside video */}
             {analysisState === 'analysing' && (
-              <div className="absolute inset-0 flex flex-col items-center justify-end pb-4 bg-black/30">
-                <div className="w-4/5 bg-slate-700 rounded-full h-2 mb-2">
+              <div className="absolute inset-x-0 bottom-0 pb-3 px-4 bg-gradient-to-t from-black/60 to-transparent">
+                <div className="w-full bg-slate-700 rounded-full h-2 mb-1">
                   <div
                     className="bg-blue-500 h-2 rounded-full transition-all"
                     style={{ width: `${progressPct}%` }}
                   />
                 </div>
-                <div className="text-white text-xs font-mono">
+                <div className="text-white text-xs font-mono text-center">
                   Frame {analysisProgress} / ~{totalFrames} ({progressPct.toFixed(0)}%)
-                </div>
-              </div>
-            )}
-
-            {/* Upload tap hint */}
-            {mode === 'upload' && videoReady && !isSeeded && analysisState === 'idle' && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="bg-black/60 rounded-xl px-6 py-4 text-center">
-                  <div className="text-3xl mb-2">👆</div>
-                  <div className="text-white font-semibold text-sm">
-                    Tap on the end of the bar to set tracking point
-                  </div>
-                  <div className="text-slate-400 text-xs mt-1">
-                    Then click Analyse Video
-                  </div>
                 </div>
               </div>
             )}
@@ -697,10 +660,10 @@ export default function BarbellTracker() {
             )}
           </div>
 
-          {/* Tracker status hint */}
-          {tracker.status === 'lost' && (
-            <div className="text-orange-400 text-sm bg-orange-950 px-4 py-2 rounded-lg">
-              ⚠️ Tracking lost — tap on the bar to re-seed
+          {/* Tap hint — BELOW the video */}
+          {hint && (
+            <div className={`w-full max-w-xl px-4 py-2.5 rounded-lg text-sm text-center ${hint.colour}`}>
+              {hint.text}
             </div>
           )}
 
@@ -716,9 +679,7 @@ export default function BarbellTracker() {
                     : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
                   }`}
               >
-                {modelsLoading
-                  ? 'Loading...'
-                  : isTracking ? '⏹ Stop' : '▶ Start Camera'}
+                {modelsLoading ? 'Loading...' : isTracking ? '⏹ Stop' : '▶ Start Camera'}
               </button>
 
               {isTracking && isSeeded && (
@@ -776,8 +737,10 @@ export default function BarbellTracker() {
                     >
                       {!videoReady
                         ? 'Loading video...'
+                        : modelsLoading
+                        ? 'Loading...'
                         : !isSeeded
-                        ? 'Tap bar to set point'
+                        ? 'Tap bar first'
                         : '▶ Analyse Video'}
                     </button>
                   )}
@@ -796,14 +759,6 @@ export default function BarbellTracker() {
                     🔄 Reset
                   </button>
                 </div>
-              )}
-
-              {uploadedVideo && analysisState === 'idle' && (
-                <p className="text-xs text-slate-500 text-center">
-                  {isSeeded
-                    ? '✅ Point set — click Analyse Video'
-                    : '👆 Tap the video above to set the tracking point on the bar end'}
-                </p>
               )}
             </div>
           )}

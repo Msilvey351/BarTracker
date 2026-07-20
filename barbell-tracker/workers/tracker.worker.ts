@@ -17,7 +17,7 @@ const TERM_CRITERIA_BOTH  = TERM_CRITERIA_EPS | TERM_CRITERIA_COUNT;
 // Load OpenCV dynamically using importScripts (works in Web Workers)
 // This bypasses the bundler entirely
 try {
-  importScripts('https://docs.opencv.org/4.8.0/opencv.js');
+  importScripts('/opencv.js');
   // cv is now available as a global
   cv = self.cv;
   if (cv?.onRuntimeInitialized !== undefined) {
