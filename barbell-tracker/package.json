@@ -8,7 +8,6 @@
     "start": "next start"
   },
   "dependencies": {
-    "@techstark/opencv-js": "^5.0.0-release.1",
     "next": "^16.2.10",
     "onnxruntime-web": "^1.15.1",
     "react": "18.2.0",

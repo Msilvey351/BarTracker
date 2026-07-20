@@ -1,22 +1,40 @@
 // @ts-nocheck
 // workers/tracker.worker.ts
 
-import cv from '@techstark/opencv-js';
+// Do NOT import cv at module level — load it dynamically
+// This prevents Turbopack from trying to bundle it
 
+let cv: any = null;
 let prevGray:   any = null;
 let prevPoints: any = null;
 let isReady  = false;
 let cvReady  = false;
 
-// Numeric constants for TermCriteria — avoids TypeScript errors with cv types
 const TERM_CRITERIA_EPS   = 0x01;
 const TERM_CRITERIA_COUNT = 0x02;
 const TERM_CRITERIA_BOTH  = TERM_CRITERIA_EPS | TERM_CRITERIA_COUNT;
 
-cv.onRuntimeInitialized = () => {
-  cvReady = true;
-  self.postMessage({ type: 'ready' });
-};
+// Load OpenCV dynamically using importScripts (works in Web Workers)
+// This bypasses the bundler entirely
+try {
+  importScripts('https://docs.opencv.org/4.8.0/opencv.js');
+  // cv is now available as a global
+  cv = self.cv;
+  if (cv?.onRuntimeInitialized !== undefined) {
+    if (cv.Mat) {
+      // Already initialised
+      cvReady = true;
+      self.postMessage({ type: 'ready' });
+    } else {
+      cv.onRuntimeInitialized = () => {
+        cvReady = true;
+        self.postMessage({ type: 'ready' });
+      };
+    }
+  }
+} catch (e) {
+  self.postMessage({ type: 'error', payload: `Failed to load OpenCV: ${e}` });
+}
 
 function imageDataToGray(imageData: ImageData): any {
   const rgba = cv.matFromImageData(imageData);
@@ -28,7 +46,6 @@ function imageDataToGray(imageData: ImageData): any {
 
 self.onmessage = (e: MessageEvent) => {
   if (!cvReady) {
-    // Queue until OpenCV is ready
     setTimeout(() => {
       self.dispatchEvent(new MessageEvent('message', { data: e.data }));
     }, 100);
@@ -37,30 +54,25 @@ self.onmessage = (e: MessageEvent) => {
 
   const { type, payload } = e.data;
 
-  // ── Seed — user tapped a point ────────────────────────────────────────────
+  // ── Seed ─────────────────────────────────────────────────────────────────
   if (type === 'seed') {
     try {
       if (prevGray)   { prevGray.delete();   prevGray   = null; }
       if (prevPoints) { prevPoints.delete(); prevPoints = null; }
 
       prevGray = imageDataToGray(payload.imageData);
-
       prevPoints = new cv.Mat(1, 1, cv.CV_32FC2);
       prevPoints.data32F[0] = payload.x;
       prevPoints.data32F[1] = payload.y;
 
       isReady = true;
-
-      self.postMessage({
-        type: 'seeded',
-        payload: { x: payload.x, y: payload.y },
-      });
+      self.postMessage({ type: 'seeded', payload: { x: payload.x, y: payload.y } });
     } catch (err) {
       self.postMessage({ type: 'error', payload: String(err) });
     }
   }
 
-  // ── Track — process next frame ────────────────────────────────────────────
+  // ── Track ─────────────────────────────────────────────────────────────────
   if (type === 'track' && isReady && prevGray && prevPoints) {
     const currGray   = imageDataToGray(payload.imageData);
     const currPoints = new cv.Mat();
@@ -86,7 +98,6 @@ self.onmessage = (e: MessageEvent) => {
         const x = currPoints.data32F[0];
         const y = currPoints.data32F[1];
 
-        // Update previous frame
         prevGray.delete();
         prevGray = currGray;
         prevPoints.delete();
@@ -94,39 +105,22 @@ self.onmessage = (e: MessageEvent) => {
 
         self.postMessage({
           type: 'tracked',
-          payload: {
-            x,
-            y,
-            tracked: true,
-            videoTimestamp: payload.videoTimestamp,
-          },
+          payload: { x, y, tracked: true, videoTimestamp: payload.videoTimestamp },
         });
       } else {
-        // Lost tracking — update gray but keep old points
         prevGray.delete();
         prevGray = currGray;
 
         self.postMessage({
           type: 'tracked',
-          payload: {
-            x: 0,
-            y: 0,
-            tracked: false,
-            videoTimestamp: payload.videoTimestamp,
-          },
+          payload: { x: 0, y: 0, tracked: false, videoTimestamp: payload.videoTimestamp },
         });
       }
     } catch (e) {
-      // If optical flow throws — clean up and report lost
       try { currGray.delete(); } catch (_) {}
       self.postMessage({
         type: 'tracked',
-        payload: {
-          x: 0,
-          y: 0,
-          tracked: false,
-          videoTimestamp: payload.videoTimestamp,
-        },
+        payload: { x: 0, y: 0, tracked: false, videoTimestamp: payload.videoTimestamp },
       });
     } finally {
       try { currPoints.delete(); } catch (_) {}
@@ -135,7 +129,7 @@ self.onmessage = (e: MessageEvent) => {
     }
   }
 
-  // ── Reset — clear tracking state ──────────────────────────────────────────
+  // ── Reset ─────────────────────────────────────────────────────────────────
   if (type === 'reset') {
     try { if (prevGray)   prevGray.delete();   } catch (_) {}
     try { if (prevPoints) prevPoints.delete(); } catch (_) {}

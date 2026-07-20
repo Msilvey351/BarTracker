@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Detection, ModelConfig } from '@/lib/detector';
-import { DEFAULT_CONFIG, preprocessFrame } from '@/lib/detector';
+import { PLATE_CONFIG, preprocessFrame } from '@/lib/detector';
 
 export type DetectorStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-export function useDetectorWorker(config: ModelConfig = DEFAULT_CONFIG) {
+export function useDetectorWorker(config: ModelConfig = PLATE_CONFIG) {
   const [status, setStatus] = useState<DetectorStatus>('idle');
   const [error, setError] = useState<string | null>(null);
 
