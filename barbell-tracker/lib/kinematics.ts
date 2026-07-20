@@ -53,16 +53,6 @@ export function calibrateFromPlate(plateBboxHeightPx: number): number {
 
 const VELOCITY_WINDOW = 8;
 
-// ── Option A — Maximum position jump filter ───────────────────────────────────
-// If bar teleports more than this between frames it's a detection glitch
-const MAX_JUMP_PX = 240;
-
-// ── Option B — Minimum detection score ───────────────────────────────────────
-// Only positions from high-confidence detections are used
-// (Note: primary score filter is in detector config at 0.45
-//  this is a secondary check inside kinematics)
-const MIN_POSITION_SCORE = 0.40;
-
 export function computeVelocity(
   positions: BarPosition[],
   pixelsPerMetre: number
@@ -87,6 +77,8 @@ const DIRECTION_FRAMES    = 10;
 const MIN_CONSISTENCY     = 0.7;
 const MIN_TRAVEL_METRES   = 0.10;
 const MIN_REP_DURATION_MS = 100;
+const MAX_JUMP_METRES     = 0.8;
+const MIN_POSITION_SCORE  = 0.40;
 
 function calcPhaseVelocity(
   positions: BarPosition[],
@@ -106,19 +98,27 @@ function calcPhaseVelocity(
   return { avgVelocity, distance, duration };
 }
 
+// ── Peak velocity — 3-frame rolling window ────────────────────────────────────
+// Using a 3-frame window instead of frame pairs makes peak velocity
+// much more stable — a 1px optical flow variance affects it far less
 function calcPeakVelocity(
   positions: BarPosition[],
   pixelsPerMetre: number
 ): number {
-  if (positions.length < 2) return 0;
+  if (positions.length < 3) return 0;
+
   let peak = 0;
-  for (let i = 1; i < positions.length; i++) {
-    const dt = (positions[i].timestamp - positions[i - 1].timestamp) / 1000;
+
+  for (let i = 2; i < positions.length; i++) {
+    const dt = (positions[i].timestamp - positions[i - 2].timestamp) / 1000;
     if (dt === 0) continue;
-    const dy = Math.abs(positions[i].y - positions[i - 1].y);
-    const v = (dy / pixelsPerMetre) / dt;
+
+    const dy = Math.abs(positions[i].y - positions[i - 2].y);
+    const v  = (dy / pixelsPerMetre) / dt;
+
     if (v > peak) peak = v;
   }
+
   return Math.min(peak, 3.0);
 }
 
@@ -154,12 +154,12 @@ export function detectRep(
     };
   }
 
-  const now = performance.now();
+  const now    = performance.now();
   const recent = positions.slice(-DIRECTION_FRAMES);
-  const first = recent[0];
-  const last = recent[recent.length - 1];
+  const first  = recent[0];
+  const last   = recent[recent.length - 1];
 
-  const dyMetres = (last.y - first.y) / pixelsPerMetre;
+  const dyMetres    = (last.y - first.y) / pixelsPerMetre;
   const dyAbsMetres = Math.abs(dyMetres);
 
   let upFrames = 0;
@@ -168,7 +168,7 @@ export function detectRep(
     if (recent[i].y < recent[i - 1].y) upFrames++;
     else if (recent[i].y > recent[i - 1].y) downFrames++;
   }
-  const totalFrames = upFrames + downFrames;
+  const totalFrames     = upFrames + downFrames;
   const upConsistency   = totalFrames > 0 ? upFrames   / totalFrames : 0;
   const downConsistency = totalFrames > 0 ? downFrames / totalFrames : 0;
 
@@ -176,25 +176,26 @@ export function detectRep(
   const isSustainedDown = dyMetres >  MIN_TRAVEL_METRES && downConsistency >= MIN_CONSISTENCY;
   const isStationary    = dyAbsMetres < 0.02;
 
-  let phase = currentPhase;
-  let repCount = currentRepCount;
+  let phase                  = currentPhase;
+  let repCount               = currentRepCount;
   let newConcentricStartTime = concentricStartTime;
   let newConcentricPositions = concentricPositions;
   let newEccentricPositions  = eccentricPositions;
-  let newRepHistory = repHistory;
-  let newPeakVelocity = currentRepPeakVelocity;
+  let newRepHistory          = repHistory;
+  let newPeakVelocity        = currentRepPeakVelocity;
 
   const latestPos = positions[positions.length - 1];
 
   switch (currentPhase) {
+
     case 'idle': {
       if (isSustainedUp) {
-        phase = 'concentric';
+        phase                  = 'concentric';
         newConcentricStartTime = now;
         newConcentricPositions = [...recent];
-        newPeakVelocity = 0;
+        newPeakVelocity        = 0;
       } else if (isSustainedDown) {
-        phase = 'eccentric';
+        phase                 = 'eccentric';
         newEccentricPositions = [...recent];
       }
       break;
@@ -202,33 +203,34 @@ export function detectRep(
 
     case 'concentric': {
       newConcentricPositions = [...concentricPositions, latestPos];
-      newPeakVelocity = Math.max(currentRepPeakVelocity, currentVelocity);
+      newPeakVelocity        = Math.max(currentRepPeakVelocity, currentVelocity);
 
       if (isStationary || isSustainedDown) {
         const concentricDuration = concentricStartTime ? now - concentricStartTime : 0;
 
-        if (concentricDuration >= MIN_REP_DURATION_MS && newConcentricPositions.length >= 2) {
+        if (concentricDuration >= MIN_REP_DURATION_MS && newConcentricPositions.length >= 3) {
           const {
             avgVelocity: concAvg,
-            distance: concDist,
-            duration: concDur,
+            distance:    concDist,
+            duration:    concDur,
           } = calcPhaseVelocity(newConcentricPositions, pixelsPerMetre);
 
+          // Use 3-frame smoothed peak velocity
           const peakV = calcPeakVelocity(newConcentricPositions, pixelsPerMetre);
 
-          repCount += 1;
-          newRepHistory = [...repHistory, {
-            repNumber: repCount,
+          repCount      += 1;
+          newRepHistory  = [...repHistory, {
+            repNumber:          repCount,
             concentricVelocity: concAvg,
-            eccentricVelocity: 0,
-            peakVelocity: peakV,
+            eccentricVelocity:  0,
+            peakVelocity:       peakV,
             concentricDistance: concDist,
             concentricDuration: concDur,
           }];
         }
 
         if (isSustainedDown) {
-          phase = 'eccentric';
+          phase                 = 'eccentric';
           newEccentricPositions = [...recent];
         } else {
           phase = 'idle';
@@ -236,7 +238,7 @@ export function detectRep(
 
         newConcentricStartTime = null;
         newConcentricPositions = [];
-        newPeakVelocity = 0;
+        newPeakVelocity        = 0;
       }
       break;
     }
@@ -261,10 +263,10 @@ export function detectRep(
         newEccentricPositions = [];
 
         if (isSustainedUp) {
-          phase = 'concentric';
+          phase                  = 'concentric';
           newConcentricStartTime = now;
           newConcentricPositions = [...recent];
-          newPeakVelocity = 0;
+          newPeakVelocity        = 0;
         } else {
           phase = 'idle';
         }
@@ -279,7 +281,7 @@ export function detectRep(
     concentricStartTime: newConcentricStartTime,
     concentricPositions: newConcentricPositions,
     eccentricPositions:  newEccentricPositions,
-    repHistory: newRepHistory,
+    repHistory:          newRepHistory,
     currentRepPeakVelocity: newPeakVelocity,
   };
 }
@@ -288,36 +290,30 @@ export function updateKinematics(
   state: KinematicsState,
   newPos: { x: number; y: number },
   timestamp: number,
-  score: number = 1.0,  // ← detection confidence score
+  score: number = 1.0,
 ): KinematicsState {
   const { pixelsPerMetre, calibrationLocked } = state;
 
-  // ── Option B — ignore low confidence detections ───────────────────────────
-  if (score < MIN_POSITION_SCORE) {
-    if (Math.random() < 0.05) {
-      console.log(`⚠️ Skipping low confidence detection: score=${score.toFixed(3)}`);
-    }
-    return state;
-  }
+  // Option B — ignore low confidence detections
+  if (score < MIN_POSITION_SCORE) return state;
 
-  // ── Option A — ignore position jumps (detection glitches) ────────────────
+  // Option A — ignore position jumps
   if (state.positions.length > 0) {
-    const last = state.positions[state.positions.length - 1];
-    const jumpPx = Math.sqrt(
+    const last      = state.positions[state.positions.length - 1];
+    const jumpPx    = Math.sqrt(
       Math.pow(newPos.x - last.x, 2) +
       Math.pow(newPos.y - last.y, 2)
     );
-    if (jumpPx > MAX_JUMP_PX) {
-      if (Math.random() < 0.1) {
-        console.log(`⚠️ Skipping position jump: ${jumpPx.toFixed(0)}px (max ${MAX_JUMP_PX}px)`);
-      }
-      return state; // ignore this detection entirely
-    }
+    const maxJumpPx = pixelsPerMetre
+      ? MAX_JUMP_METRES * pixelsPerMetre
+      : 150;
+
+    if (jumpPx > maxJumpPx) return state;
   }
 
-  const newBarPos: BarPosition = { ...newPos, timestamp };
-  const positions = [...state.positions, newBarPos].slice(-60);
-  const barPath   = [...state.barPath,   newBarPos].slice(-300);
+  const newBarPos  = { ...newPos, timestamp };
+  const positions  = [...state.positions, newBarPos].slice(-60);
+  const barPath    = [...state.barPath,   newBarPos].slice(-300);
 
   const velocity     = pixelsPerMetre ? computeVelocity(positions, pixelsPerMetre) : 0;
   const peakVelocity = Math.max(state.peakVelocity, velocity);
