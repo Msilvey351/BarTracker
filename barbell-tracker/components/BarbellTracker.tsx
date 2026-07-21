@@ -49,7 +49,6 @@ export default function BarbellTracker() {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [totalFrames, setTotalFrames]           = useState(0);
   const [isSeeded, setIsSeeded]                 = useState(false);
-  const [playbackSpeed, setPlaybackSpeed]       = useState(1);
 
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
@@ -255,7 +254,6 @@ export default function BarbellTracker() {
     setAnalysisState('idle');
     setAnalysisProgress(0);
     setIsSeeded(false);
-    setPlaybackSpeed(1);
     lastPointRef.current = null;
     resetAll();
     trackerRef.current.reset();
@@ -266,12 +264,7 @@ export default function BarbellTracker() {
     }
   }, [uploadedVideo, resetAll]);
 
-  const handleSpeedChange = useCallback((speed: number) => {
-    setPlaybackSpeed(speed);
-    if (videoRef.current) videoRef.current.playbackRate = speed;
-  }, []);
-
-  // ── Video analysis — plays at user speed, samples at deterministic intervals
+  // ── Seek-based deterministic 30fps analysis ───────────────────────────────
   const analyseVideoFrameByFrame = useCallback(async () => {
     const video = videoRef.current;
     if (!video || !isSeeded) return;
@@ -307,85 +300,59 @@ export default function BarbellTracker() {
       );
     }
 
+    let frameIndex           = 0;
     let calibrationAttempted = kinematicsRef.current.calibrationLocked;
-    let frameIndex    = 0;
-    let nextSampleTime = 0; // next video timestamp to sample (seconds)
 
-    // Play at user-selected speed
-    video.playbackRate = playbackSpeed;
-    video.play();
+    while (!analysisAbortRef.current) {
+      // Exact frame time — always 0.000, 0.033, 0.066...
+      const targetTime = frameIndex * frameTime;
+      if (targetTime >= duration) break;
 
-    await new Promise<void>((resolve) => {
-      let inferenceInFlight = false;
+      // Seek to exact frame (skip first since already at 0)
+      if (frameIndex > 0) {
+        video.currentTime = targetTime;
+        await new Promise<void>(resolve => {
+          const h = () => { video.removeEventListener('seeked', h); resolve(); };
+          video.addEventListener('seeked', h);
+          setTimeout(resolve, 500); // fallback
+        });
+      }
 
-      const onFrame = async () => {
-        if (analysisAbortRef.current || video.ended) {
-          resolve();
-          return;
-        }
+      const imageData = captureFrame();
 
-        const currentTime = video.currentTime;
-
-        // Only process when video has reached the next scheduled sample point
-        // Using exact scheduled timestamps makes results deterministic
-        if (currentTime >= nextSampleTime && !inferenceInFlight) {
-          inferenceInFlight = true;
-
-          // Use the scheduled time as timestamp — not actual currentTime
-          // This is the key to determinism: same timestamps every run
-          const sampleTimestamp = nextSampleTime * 1000;
-          nextSampleTime += frameTime;
-
-          const imageData = captureFrame();
-
-          if (imageData) {
-            // Calibration — first 3 seconds only
-            if (!calibrationAttempted && !kinematicsRef.current.calibrationLocked) {
-              const plateResult = await plateDetectorRef.current.detect(imageData);
-              if (plateResult.length > 0) {
-                updateCalibrationRef.current(plateResult);
-                calibrationAttempted = true;
-              }
-              if (currentTime > 3) calibrationAttempted = true;
-            }
-
-            // Track with deterministic scheduled timestamp
-            const result = await trackerRef.current.track(
-              imageData,
-              sampleTimestamp
-            );
-
-            lastPointRef.current = result;
-
-            if (result.tracked) {
-              updateWithTimestampRef.current([{
-                x: result.x - 5, y: result.y - 5,
-                width: 10, height: 10,
-                centerX: result.x, centerY: result.y,
-                score: 1.0, label: 0,
-              }], sampleTimestamp);
-              render();
-            }
+      if (imageData) {
+        // Plate calibration — first 3 seconds only
+        if (!calibrationAttempted && !kinematicsRef.current.calibrationLocked) {
+          const plateResult = await plateDetectorRef.current.detect(imageData);
+          if (plateResult.length > 0) {
+            updateCalibrationRef.current(plateResult);
+            calibrationAttempted = true;
           }
-
-          frameIndex++;
-          setAnalysisProgress(frameIndex);
-          inferenceInFlight = false;
+          if (targetTime > 3) calibrationAttempted = true;
         }
 
-        if (!analysisAbortRef.current && !video.ended) {
-          requestAnimationFrame(onFrame);
-        } else {
-          resolve();
+        // Track — exact scheduled timestamp, same every run
+        const result = await trackerRef.current.track(
+          imageData,
+          targetTime * 1000
+        );
+
+        lastPointRef.current = result;
+
+        if (result.tracked) {
+          updateWithTimestampRef.current([{
+            x: result.x - 5, y: result.y - 5,
+            width: 10, height: 10,
+            centerX: result.x, centerY: result.y,
+            score: 1.0, label: 0,
+          }], targetTime * 1000);
+          render();
         }
-      };
+      }
 
-      video.addEventListener('ended', () => resolve(), { once: true });
-      requestAnimationFrame(onFrame);
-    });
-
-    video.pause();
-    video.playbackRate = 1.0;
+      frameIndex++;
+      setAnalysisProgress(frameIndex);
+    }
 
     if (!analysisAbortRef.current) {
       setAnalysisState('complete');
@@ -399,13 +366,12 @@ export default function BarbellTracker() {
     } else {
       setAnalysisState('idle');
     }
-  }, [isSeeded, captureFrame, render, resetAll, playbackSpeed]);
+  }, [isSeeded, captureFrame, render, resetAll]);
 
   const stopAnalysis = useCallback(() => {
     analysisAbortRef.current = true;
     if (videoRef.current) {
       videoRef.current.pause();
-      videoRef.current.playbackRate = 1.0;
     }
     setAnalysisState('idle');
   }, []);
@@ -443,7 +409,6 @@ export default function BarbellTracker() {
     setAnalysisState('idle');
     setAnalysisProgress(0);
     setIsSeeded(false);
-    setPlaybackSpeed(1);
     lastPointRef.current = null;
     plateInFlightRef.current = false;
     trackInFlightRef.current = false;
@@ -487,7 +452,7 @@ export default function BarbellTracker() {
   const modelsLoading = !trackerReady || !plateReady;
   const progressPct   = totalFrames > 0 ? Math.min(100, (analysisProgress / totalFrames) * 100) : 0;
 
-  // ── Tap hint below video ──────────────────────────────────────────────────
+  // ── Tap hint ──────────────────────────────────────────────────────────────
   const tapHintText = () => {
     if (tracker.status === 'lost')
       return { text: '⚠️ Tracking lost — tap on the bar to re-seed', colour: 'text-orange-400 bg-orange-950' };
@@ -705,7 +670,7 @@ export default function BarbellTracker() {
                   />
                 </div>
                 <div className="text-white text-xs font-mono text-center">
-                  {progressPct.toFixed(0)}% · {playbackSpeed}x speed
+                  {progressPct.toFixed(0)}% · {analysisProgress} / {totalFrames} frames
                 </div>
               </div>
             )}
@@ -777,27 +742,6 @@ export default function BarbellTracker() {
                 />
               </label>
 
-              {/* Playback speed */}
-              {uploadedVideo && (
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="text-slate-400 text-xs">Speed:</span>
-                  {[0.25, 0.5, 1, 1.5, 2].map((speed) => (
-                    <button
-                      key={speed}
-                      onClick={() => handleSpeedChange(speed)}
-                      disabled={analysisState === 'analysing'}
-                      className={`px-3 py-1 rounded-md text-xs font-mono transition-colors
-                        ${playbackSpeed === speed
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                        } disabled:opacity-50`}
-                    >
-                      {speed}x
-                    </button>
-                  ))}
-                </div>
-              )}
-
               {/* Analyse / stop / reset */}
               {uploadedVideo && (
                 <div className="flex gap-3">
@@ -842,7 +786,7 @@ export default function BarbellTracker() {
 
               {uploadedVideo && analysisState === 'idle' && (
                 <p className="text-xs text-slate-500 text-center">
-                  Samples at 30fps · plays at selected speed · deterministic results
+                  Seek-based · 30fps · deterministic results every run
                 </p>
               )}
             </div>
