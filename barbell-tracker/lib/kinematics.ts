@@ -60,8 +60,8 @@ export function computeVelocity(
   if (positions.length < 2) return 0;
 
   const window = positions.slice(-VELOCITY_WINDOW);
-  const first = window[0];
-  const last = window[window.length - 1];
+  const first  = window[0];
+  const last   = window[window.length - 1];
 
   const dtSec = (last.timestamp - first.timestamp) / 1000;
   if (dtSec === 0) return 0;
@@ -86,21 +86,20 @@ function calcPhaseVelocity(
 ): { avgVelocity: number; distance: number; duration: number } {
   if (positions.length < 2) return { avgVelocity: 0, distance: 0, duration: 0 };
 
-  const first = positions[0];
-  const last = positions[positions.length - 1];
+  const first    = positions[0];
+  const last     = positions[positions.length - 1];
   const duration = (last.timestamp - first.timestamp) / 1000;
   if (duration === 0) return { avgVelocity: 0, distance: 0, duration: 0 };
 
-  const dyPx = Math.abs(last.y - first.y);
-  const distance = dyPx / pixelsPerMetre;
+  const dyPx       = Math.abs(last.y - first.y);
+  const distance   = dyPx / pixelsPerMetre;
   const avgVelocity = distance / duration;
 
   return { avgVelocity, distance, duration };
 }
 
 // ── Peak velocity — 3-frame rolling window ────────────────────────────────────
-// Using a 3-frame window instead of frame pairs makes peak velocity
-// much more stable — a 1px optical flow variance affects it far less
+// More stable than frame pairs — halves the effect of 1px optical flow noise
 function calcPeakVelocity(
   positions: BarPosition[],
   pixelsPerMetre: number
@@ -108,14 +107,11 @@ function calcPeakVelocity(
   if (positions.length < 3) return 0;
 
   let peak = 0;
-
   for (let i = 2; i < positions.length; i++) {
     const dt = (positions[i].timestamp - positions[i - 2].timestamp) / 1000;
     if (dt === 0) continue;
-
     const dy = Math.abs(positions[i].y - positions[i - 2].y);
     const v  = (dy / pixelsPerMetre) / dt;
-
     if (v > peak) peak = v;
   }
 
@@ -154,7 +150,12 @@ export function detectRep(
     };
   }
 
-  const now    = performance.now();
+  // ── Use latest position timestamp instead of performance.now() ────────────
+  // During video analysis: timestamp = video time (targetTime * 1000)
+  // During live camera:    timestamp = performance.now()
+  // Either way, all timing is consistent with the position data
+  const now = positions[positions.length - 1].timestamp;
+
   const recent = positions.slice(-DIRECTION_FRAMES);
   const first  = recent[0];
   const last   = recent[recent.length - 1];
@@ -162,7 +163,7 @@ export function detectRep(
   const dyMetres    = (last.y - first.y) / pixelsPerMetre;
   const dyAbsMetres = Math.abs(dyMetres);
 
-  let upFrames = 0;
+  let upFrames   = 0;
   let downFrames = 0;
   for (let i = 1; i < recent.length; i++) {
     if (recent[i].y < recent[i - 1].y) upFrames++;
@@ -191,7 +192,7 @@ export function detectRep(
     case 'idle': {
       if (isSustainedUp) {
         phase                  = 'concentric';
-        newConcentricStartTime = now;
+        newConcentricStartTime = now; // ← video time or wall clock, consistent
         newConcentricPositions = [...recent];
         newPeakVelocity        = 0;
       } else if (isSustainedDown) {
@@ -206,7 +207,10 @@ export function detectRep(
       newPeakVelocity        = Math.max(currentRepPeakVelocity, currentVelocity);
 
       if (isStationary || isSustainedDown) {
-        const concentricDuration = concentricStartTime ? now - concentricStartTime : 0;
+        // ── Duration check uses position timestamps — correct for both modes ─
+        const concentricDuration = concentricStartTime !== null
+          ? now - concentricStartTime  // both in same time domain
+          : 0;
 
         if (concentricDuration >= MIN_REP_DURATION_MS && newConcentricPositions.length >= 3) {
           const {
@@ -215,11 +219,10 @@ export function detectRep(
             duration:    concDur,
           } = calcPhaseVelocity(newConcentricPositions, pixelsPerMetre);
 
-          // Use 3-frame smoothed peak velocity
           const peakV = calcPeakVelocity(newConcentricPositions, pixelsPerMetre);
 
-          repCount      += 1;
-          newRepHistory  = [...repHistory, {
+          repCount     += 1;
+          newRepHistory = [...repHistory, {
             repNumber:          repCount,
             concentricVelocity: concAvg,
             eccentricVelocity:  0,
