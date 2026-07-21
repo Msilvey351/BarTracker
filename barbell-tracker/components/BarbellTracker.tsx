@@ -49,6 +49,8 @@ export default function BarbellTracker() {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [totalFrames, setTotalFrames]           = useState(0);
   const [isSeeded, setIsSeeded]                 = useState(false);
+  const [showTips, setShowTips]                 = useState(false);
+  const [showCalInput, setShowCalInput]         = useState(false);
 
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
@@ -131,7 +133,7 @@ export default function BarbellTracker() {
     );
   }, [getDisplayOffset]);
 
-  // ── Handle tap on video ───────────────────────────────────────────────────
+  // ── Handle tap ────────────────────────────────────────────────────────────
   const handleTap = useCallback(async (
     e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>
   ) => {
@@ -169,17 +171,12 @@ export default function BarbellTracker() {
   // ── Camera loop ───────────────────────────────────────────────────────────
   const loop = useCallback(() => {
     if (!isRunningRef.current) return;
-
     const video   = videoRef.current;
     const overlay = overlayCanvasRef.current;
-
     if (video && video.ended) { endSet(); return; }
-
     if (video && overlay && !video.paused) {
       const imageData = captureFrame();
-
       if (imageData) {
-        // Optical flow tracking
         if (!trackInFlightRef.current && trackerRef.current.status === 'seeded') {
           trackInFlightRef.current = true;
           trackerRef.current.track(imageData, performance.now()).then((result) => {
@@ -195,8 +192,6 @@ export default function BarbellTracker() {
             trackInFlightRef.current = false;
           });
         }
-
-        // Plate calibration — once only
         if (
           !plateInFlightRef.current &&
           !kinematicsRef.current.calibrationLocked &&
@@ -208,9 +203,7 @@ export default function BarbellTracker() {
             plateInFlightRef.current = false;
           });
         }
-
         render();
-
         fpsRef.current.frames++;
         const now = performance.now();
         if (now - fpsRef.current.last > 1000) {
@@ -219,7 +212,6 @@ export default function BarbellTracker() {
         }
       }
     }
-
     animFrameRef.current = requestAnimationFrame(loop);
   }, [captureFrame, render, endSet]);
 
@@ -264,7 +256,7 @@ export default function BarbellTracker() {
     }
   }, [uploadedVideo, resetAll]);
 
-  // ── Seek-based deterministic 30fps analysis ───────────────────────────────
+  // ── Seek-based 30fps analysis ─────────────────────────────────────────────
   const analyseVideoFrameByFrame = useCallback(async () => {
     const video = videoRef.current;
     if (!video || !isSeeded) return;
@@ -282,7 +274,6 @@ export default function BarbellTracker() {
     const estimated  = Math.floor(duration * SAMPLE_FPS);
     setTotalFrames(estimated);
 
-    // Seek to start
     video.pause();
     video.currentTime = 0;
     await new Promise<void>(resolve => {
@@ -290,7 +281,6 @@ export default function BarbellTracker() {
       video.addEventListener('seeked', h);
     });
 
-    // Re-seed tracker at frame 0
     const firstFrame = captureFrame();
     if (firstFrame && lastPointRef.current) {
       await trackerRef.current.seed(
@@ -304,24 +294,20 @@ export default function BarbellTracker() {
     let calibrationAttempted = kinematicsRef.current.calibrationLocked;
 
     while (!analysisAbortRef.current) {
-      // Exact frame time — always 0.000, 0.033, 0.066...
       const targetTime = frameIndex * frameTime;
       if (targetTime >= duration) break;
 
-      // Seek to exact frame (skip first since already at 0)
       if (frameIndex > 0) {
         video.currentTime = targetTime;
         await new Promise<void>(resolve => {
           const h = () => { video.removeEventListener('seeked', h); resolve(); };
           video.addEventListener('seeked', h);
-          setTimeout(resolve, 500); // fallback
+          setTimeout(resolve, 500);
         });
       }
 
       const imageData = captureFrame();
-
       if (imageData) {
-        // Plate calibration — first 3 seconds only
         if (!calibrationAttempted && !kinematicsRef.current.calibrationLocked) {
           const plateResult = await plateDetectorRef.current.detect(imageData);
           if (plateResult.length > 0) {
@@ -331,12 +317,7 @@ export default function BarbellTracker() {
           if (targetTime > 3) calibrationAttempted = true;
         }
 
-        // Track — exact scheduled timestamp, same every run
-        const result = await trackerRef.current.track(
-          imageData,
-          targetTime * 1000
-        );
-
+        const result = await trackerRef.current.track(imageData, targetTime * 1000);
         lastPointRef.current = result;
 
         if (result.tracked) {
@@ -370,9 +351,7 @@ export default function BarbellTracker() {
 
   const stopAnalysis = useCallback(() => {
     analysisAbortRef.current = true;
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    if (videoRef.current) videoRef.current.pause();
     setAnalysisState('idle');
   }, []);
 
@@ -419,6 +398,7 @@ export default function BarbellTracker() {
     const val = parseFloat(manualCal);
     if (isNaN(val) || val <= 0) return;
     setCalibration(val);
+    setShowCalInput(false);
   }, [manualCal, setCalibration]);
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
@@ -452,409 +432,417 @@ export default function BarbellTracker() {
   const modelsLoading = !trackerReady || !plateReady;
   const progressPct   = totalFrames > 0 ? Math.min(100, (analysisProgress / totalFrames) * 100) : 0;
 
-  // ── Tap hint ──────────────────────────────────────────────────────────────
   const tapHintText = () => {
     if (tracker.status === 'lost')
       return { text: '⚠️ Tracking lost — tap on the bar to re-seed', colour: 'text-orange-400 bg-orange-950' };
     if (isSeeded)
-      return { text: `✅ Point set${mode === 'upload' ? ' — click Analyse Video' : ' — tracking active'}`, colour: 'text-green-400 bg-slate-800' };
+      return { text: mode === 'upload' ? '✅ Point set — click Analyse Video' : '✅ Tracking active', colour: 'text-green-400 bg-slate-800' };
     if (mode === 'camera' && isTracking)
-      return { text: '👆 Tap on the end of the bar to start tracking', colour: 'text-slate-300 bg-slate-800' };
+      return { text: '👆 Tap the end of the bar to start tracking', colour: 'text-slate-300 bg-slate-800' };
     if (mode === 'upload' && videoReady && analysisState === 'idle')
-      return { text: '👆 Tap on the end of the bar to set tracking point, then click Analyse Video', colour: 'text-slate-300 bg-slate-800' };
+      return { text: '👆 Tap the end of the bar, then click Analyse Video', colour: 'text-slate-300 bg-slate-800' };
     return null;
   };
-
   const hint = tapHintText();
 
-  return (
-    <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
-      <h1 className="text-2xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
+  // ── Set complete ──────────────────────────────────────────────────────────
+  if (setComplete && completedReps.length > 0) {
+    return (
+      <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
+        <h1 className="text-xl font-bold tracking-tight">🏋️ Barbell Tracker</h1>
 
-      {/* Status badges */}
-      {!setComplete && (
-        <div className="flex gap-3 text-sm flex-wrap justify-center">
-          <StatusBadge label="Tracker" value={tracker.status}       ok={trackerReady} />
-          <StatusBadge label="Plate"   value={plateDetector.status} ok={plateReady} />
-          <StatusBadge label="Camera"  value={webcam.isReady ? 'ready' : 'off'} ok={webcam.isReady} />
-          <StatusBadge label="FPS"     value={fps.toString()}       ok={fps > 5} />
-          <div className={`px-3 py-1 rounded-full text-xs font-mono border
-            ${kinematics.calibrationLocked
-              ? 'border-green-700 text-green-400'
-              : 'border-orange-700 text-orange-400'}`}>
-            CAL: {kinematics.calibrationLocked
-              ? `${kinematics.pixelsPerMetre!.toFixed(0)} px/m 🔒`
-              : 'awaiting...'}
+        <div className="text-center">
+          <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
+          <div className="text-slate-400 text-sm">
+            {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
+            {kinematics.calibrationLocked && (
+              <span className="ml-2 text-slate-500">
+                · CAL {kinematics.pixelsPerMetre!.toFixed(0)} px/m
+              </span>
+            )}
           </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3 w-full max-w-xl">
+          <SummaryCard
+            label="Avg Velocity"
+            value={`${avgSetVelocity.toFixed(2)} m/s`}
+            colour={avgSetVelocity > 0.5 ? 'text-green-400' : avgSetVelocity > 0.3 ? 'text-yellow-400' : 'text-red-400'}
+          />
+          <SummaryCard
+            label="Best Rep"
+            value={bestRep ? `${bestRep.concentricVelocity.toFixed(2)} m/s` : '--'}
+            sub={bestRep ? `Rep #${bestRep.repNumber}` : ''}
+            colour="text-green-400"
+          />
+          <SummaryCard
+            label="Vel. Loss"
+            value={`${velocityLoss.toFixed(0)}%`}
+            colour={velocityLoss < 10 ? 'text-green-400' : velocityLoss < 20 ? 'text-yellow-400' : 'text-red-400'}
+          />
+        </div>
+
+        <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700">
+            <h2 className="text-sm font-semibold text-slate-300">Rep Breakdown</h2>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-slate-400 text-xs border-b border-slate-700">
+                <th className="px-3 py-2 text-left">Rep</th>
+                <th className="px-3 py-2 text-right">Avg</th>
+                <th className="px-3 py-2 text-right">Peak</th>
+                <th className="px-3 py-2 text-right">Dist</th>
+                <th className="px-3 py-2 text-right">vs Best</th>
+              </tr>
+            </thead>
+            <tbody>
+              {completedReps.map((rep) => {
+                const drop = bestRep
+                  ? (bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100
+                  : 0;
+                return (
+                  <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
+                    <td className="px-3 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
+                    <td className={`px-3 py-2 font-mono text-right font-bold
+                      ${rep.concentricVelocity > 0.5 ? 'text-green-400'
+                      : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
+                      : 'text-red-400'}`}>
+                      {rep.concentricVelocity.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-right text-blue-400">
+                      {rep.peakVelocity.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-right text-slate-400">
+                      {(rep.concentricDistance * 100).toFixed(0)}cm
+                    </td>
+                    <td className={`px-3 py-2 font-mono text-right text-xs
+                      ${drop < 5 ? 'text-green-400' : drop < 15 ? 'text-yellow-400' : 'text-red-400'}`}>
+                      {drop < 1 ? '🏆' : `-${drop.toFixed(0)}%`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <button
+          onClick={startNewSet}
+          className="w-full max-w-xl py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700 transition-colors"
+        >
+          🔄 Start New Set
+        </button>
+      </div>
+    );
+  }
+
+  // ── Main tracking UI ──────────────────────────────────────────────────────
+  return (
+    <div className="flex flex-col bg-slate-950 min-h-screen text-white">
+
+      {/* ── Top bar ── */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+        <h1 className="text-base font-bold">🏋️ Barbell Tracker</h1>
+
+        {/* Status dots — compact */}
+        <div className="flex items-center gap-2 text-xs">
+          <StatusDot ok={trackerReady}  label={`T:${tracker.status.slice(0,4)}`} />
+          <StatusDot ok={plateReady}    label={`P:${plateDetector.status.slice(0,4)}`} />
+          <StatusDot ok={fps > 5}       label={`${fps}fps`} />
+          <StatusDot
+            ok={!!kinematics.calibrationLocked}
+            label={kinematics.calibrationLocked ? `${kinematics.pixelsPerMetre!.toFixed(0)}px/m` : 'NO CAL'}
+          />
+        </div>
+      </div>
+
+      {/* ── Mode toggle ── */}
+      <div className="flex bg-slate-900 border-b border-slate-800">
+        <button
+          onClick={() => switchMode('camera')}
+          className={`flex-1 py-2.5 text-sm font-semibold transition-colors
+            ${mode === 'camera' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
+        >
+          📷 Live Camera
+        </button>
+        <button
+          onClick={() => switchMode('upload')}
+          className={`flex-1 py-2.5 text-sm font-semibold transition-colors
+            ${mode === 'upload' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}
+        >
+          📁 Upload Video
+        </button>
+      </div>
+
+      {/* ── VIDEO — takes up as much space as possible ── */}
+      <div
+        className="relative bg-black w-full cursor-crosshair"
+        style={{ minHeight: '50vh', maxHeight: '65vh' }}
+        onClick={handleTap}
+        onTouchStart={handleTap}
+      >
+        <video
+          ref={videoRef}
+          className="w-full h-full object-contain"
+          style={{ minHeight: '50vh', maxHeight: '65vh' }}
+          playsInline
+          muted
+          onLoadedData={() => {
+            setVideoReady(true);
+            if (videoRef.current) videoRef.current.playbackRate = 1.0;
+          }}
+        />
+        <canvas
+          ref={overlayCanvasRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ pointerEvents: 'none' }}
+        />
+
+        {/* Progress bar */}
+        {analysisState === 'analysing' && (
+          <div className="absolute inset-x-0 bottom-0 pb-2 px-4 bg-gradient-to-t from-black/70 to-transparent">
+            <div className="w-full bg-slate-700 rounded-full h-1.5 mb-1">
+              <div
+                className="bg-blue-500 h-1.5 rounded-full transition-all"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+            <div className="text-white text-xs font-mono text-center">
+              {progressPct.toFixed(0)}% · {analysisProgress}/{totalFrames} frames
+            </div>
+          </div>
+        )}
+
+        {!webcam.isReady && !uploadedVideo && (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
+            {mode === 'camera' ? 'Tap Start Camera below' : 'Upload a video below'}
+          </div>
+        )}
+      </div>
+
+      {/* ── Tap hint ── */}
+      {hint && (
+        <div className={`px-4 py-2 text-xs text-center ${hint.colour}`}>
+          {hint.text}
         </div>
       )}
 
-      {/* ── Set complete summary ───────────────────────────────────────────── */}
-      {setComplete && completedReps.length > 0 ? (
-        <div className="w-full max-w-xl flex flex-col gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
-            <div className="text-slate-400 text-sm">
-              {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
-              {kinematics.calibrationLocked && (
-                <span className="ml-2 text-slate-500">
-                  · CAL {kinematics.pixelsPerMetre!.toFixed(0)} px/m
+      {/* ── Controls ── */}
+      <div className="flex flex-col gap-2 px-3 py-3">
+
+        {/* Camera controls */}
+        {mode === 'camera' && (
+          <div className="flex gap-2">
+            <button
+              onClick={isTracking ? stopCamera : startCamera}
+              disabled={modelsLoading}
+              className={`flex-1 py-3 rounded-lg font-semibold text-sm transition-colors
+                ${isTracking
+                  ? 'bg-red-600 hover:bg-red-700'
+                  : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
+                }`}
+            >
+              {modelsLoading ? 'Loading...' : isTracking ? '⏹ Stop' : '▶ Start Camera'}
+            </button>
+
+            {isTracking && isSeeded && (
+              <button
+                onClick={endSet}
+                className="flex-1 py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700"
+              >
+                🏁 End Set
+              </button>
+            )}
+
+            <button
+              onClick={resetKinematics}
+              className="px-4 py-3 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
+            >
+              🔄
+            </button>
+          </div>
+        )}
+
+        {/* Upload controls */}
+        {mode === 'upload' && (
+          <>
+            {/* File picker */}
+            <label className="cursor-pointer">
+              <div className="border border-dashed border-slate-600 hover:border-blue-500
+                rounded-lg py-3 text-center transition-colors">
+                <span className="text-sm text-slate-300">
+                  {uploadedVideo ? '📹 Change video' : '📹 Upload video'}
                 </span>
-              )}
-            </div>
-          </div>
+              </div>
+              <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+            </label>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-center">
-              <div className="text-slate-400 text-xs mb-1">Avg Velocity</div>
-              <div className={`font-bold font-mono text-xl
-                ${avgSetVelocity > 0.5 ? 'text-green-400'
-                : avgSetVelocity > 0.3 ? 'text-yellow-400'
-                : 'text-red-400'}`}>
-                {avgSetVelocity.toFixed(2)} m/s
+            {/* Analyse / stop / reset */}
+            {uploadedVideo && (
+              <div className="flex gap-2">
+                {analysisState === 'analysing' ? (
+                  <button
+                    onClick={stopAnalysis}
+                    className="flex-1 py-3 rounded-lg font-semibold text-sm bg-red-600 hover:bg-red-700"
+                  >
+                    ⏹ Stop
+                  </button>
+                ) : (
+                  <button
+                    onClick={analyseVideoFrameByFrame}
+                    disabled={!videoReady || modelsLoading || !isSeeded}
+                    className="flex-1 py-3 rounded-lg font-semibold text-sm bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed"
+                  >
+                    {!videoReady ? 'Loading...' : modelsLoading ? 'Loading...' : !isSeeded ? 'Tap bar first' : '▶ Analyse'}
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    resetAll();
+                    trackerRef.current.reset();
+                    setAnalysisState('idle');
+                    setAnalysisProgress(0);
+                    setIsSeeded(false);
+                    lastPointRef.current = null;
+                  }}
+                  disabled={analysisState === 'analysing'}
+                  className="px-4 py-3 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600 disabled:opacity-50"
+                >
+                  🔄
+                </button>
               </div>
-            </div>
-            <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-center">
-              <div className="text-slate-400 text-xs mb-1">Best Rep</div>
-              <div className="font-bold font-mono text-xl text-green-400">
-                {bestRep ? `${bestRep.concentricVelocity.toFixed(2)} m/s` : '--'}
-              </div>
-              <div className="text-slate-500 text-xs">
-                {bestRep ? `Rep #${bestRep.repNumber}` : ''}
-              </div>
-            </div>
-            <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-center">
-              <div className="text-slate-400 text-xs mb-1">Velocity Loss</div>
-              <div className={`font-bold font-mono text-xl
-                ${velocityLoss < 10 ? 'text-green-400'
-                : velocityLoss < 20 ? 'text-yellow-400'
-                : 'text-red-400'}`}>
-                {velocityLoss.toFixed(0)}%
-              </div>
-            </div>
-          </div>
+            )}
+          </>
+        )}
 
-          <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-700">
-              <h2 className="text-sm font-semibold text-slate-300">
-                Rep Breakdown — Concentric Velocity
-              </h2>
-            </div>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-400 text-xs border-b border-slate-700">
-                  <th className="px-4 py-2 text-left">Rep</th>
-                  <th className="px-4 py-2 text-right">Avg</th>
-                  <th className="px-4 py-2 text-right">Peak</th>
-                  <th className="px-4 py-2 text-right">Distance</th>
-                  <th className="px-4 py-2 text-right">vs Best</th>
-                </tr>
-              </thead>
-              <tbody>
-                {completedReps.map((rep) => {
-                  const drop = bestRep
-                    ? (bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100
-                    : 0;
-                  return (
-                    <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
-                      <td className="px-4 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
-                      <td className={`px-4 py-2 font-mono text-right font-bold
-                        ${rep.concentricVelocity > 0.5 ? 'text-green-400'
-                        : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
-                        : 'text-red-400'}`}>
-                        {rep.concentricVelocity.toFixed(2)} m/s
-                      </td>
-                      <td className="px-4 py-2 font-mono text-right text-blue-400">
-                        {rep.peakVelocity.toFixed(2)} m/s
-                      </td>
-                      <td className="px-4 py-2 font-mono text-right text-slate-400">
-                        {(rep.concentricDistance * 100).toFixed(0)}cm
-                      </td>
-                      <td className={`px-4 py-2 font-mono text-right text-xs
-                        ${drop < 5 ? 'text-green-400'
-                        : drop < 15 ? 'text-yellow-400'
-                        : 'text-red-400'}`}>
-                        {drop < 1 ? '🏆 best' : `-${drop.toFixed(0)}%`}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+        {/* Live stats — compact row */}
+        <div className="grid grid-cols-4 gap-2">
+          <MiniStat
+            label="Velocity"
+            value={kinematics.pixelsPerMetre ? `${kinematics.velocity.toFixed(2)}` : '--'}
+            unit="m/s"
+            highlight={kinematics.velocity > 0.5}
+          />
+          <MiniStat
+            label="Peak"
+            value={kinematics.pixelsPerMetre ? `${kinematics.peakVelocity.toFixed(2)}` : '--'}
+            unit="m/s"
+          />
+          <MiniStat label="Reps" value={kinematics.repCount.toString()} large />
+          <MiniStat label="Phase" value={kinematics.phase.slice(0, 3).toUpperCase()} />
+        </div>
 
+        {/* Settings row — cal + tips */}
+        <div className="flex gap-2">
           <button
-            onClick={startNewSet}
-            className="w-full py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700 transition-colors"
+            onClick={() => setShowCalInput(v => !v)}
+            className="flex-1 py-2 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 text-slate-300"
           >
-            🔄 Start New Set
+            ⚙️ {kinematics.calibrationLocked ? `CAL: ${kinematics.pixelsPerMetre!.toFixed(0)} px/m 🔒` : 'Manual Calibration'}
+          </button>
+          <button
+            onClick={() => setShowTips(v => !v)}
+            className="px-4 py-2 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 text-slate-300"
+          >
+            💡 Tips
           </button>
         </div>
 
-      ) : (
-        <>
-          {/* Mode toggle */}
-          <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
-            <button
-              onClick={() => switchMode('camera')}
-              className={`px-5 py-2 rounded-md text-sm font-semibold transition-colors
-                ${mode === 'camera' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-            >
-              📷 Live Camera
-            </button>
-            <button
-              onClick={() => switchMode('upload')}
-              className={`px-5 py-2 rounded-md text-sm font-semibold transition-colors
-                ${mode === 'upload' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-            >
-              📁 Upload Video
-            </button>
-          </div>
-
-          {/* Manual calibration */}
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-slate-400 text-xs">Manual cal (px/m):</span>
+        {/* Calibration input — collapsible */}
+        {showCalInput && (
+          <div className="flex gap-2 items-center bg-slate-800 rounded-lg px-3 py-2">
+            <span className="text-xs text-slate-400 shrink-0">px/m:</span>
             <input
               type="number"
               value={manualCal}
               onChange={(e) => setManualCal(e.target.value)}
               placeholder="e.g. 400"
-              className="w-24 px-2 py-1 rounded bg-slate-800 border border-slate-600 text-white text-xs font-mono"
+              className="flex-1 bg-transparent text-white text-sm font-mono outline-none"
             />
             <button
               onClick={applyManualCal}
-              className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs"
+              className="px-3 py-1 rounded bg-blue-600 text-xs font-semibold"
             >
               Apply
             </button>
             {kinematics.calibrationLocked && (
               <button
-                onClick={resetAll}
-                className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs text-orange-400"
+                onClick={() => { resetAll(); setShowCalInput(false); }}
+                className="px-3 py-1 rounded bg-slate-600 text-xs text-orange-400"
               >
-                🔓 Unlock
+                🔓
               </button>
             )}
           </div>
+        )}
 
-          {/* Video */}
-          <div
-            className="relative rounded-xl overflow-hidden border border-slate-700 bg-black w-full cursor-crosshair"
-            style={{ maxWidth: 720, aspectRatio: '16/9' }}
-            onClick={handleTap}
-            onTouchStart={handleTap}
-          >
-            <video
-              ref={videoRef}
-              className="w-full h-full object-contain"
-              playsInline
-              muted
-              onLoadedData={() => {
-                setVideoReady(true);
-                if (videoRef.current) videoRef.current.playbackRate = 1.0;
-              }}
-            />
-            <canvas
-              ref={overlayCanvasRef}
-              className="absolute inset-0 w-full h-full"
-              style={{ pointerEvents: 'none' }}
-            />
-
-            {/* Progress bar */}
-            {analysisState === 'analysing' && (
-              <div className="absolute inset-x-0 bottom-0 pb-3 px-4 bg-gradient-to-t from-black/60 to-transparent">
-                <div className="w-full bg-slate-700 rounded-full h-2 mb-1">
-                  <div
-                    className="bg-blue-500 h-2 rounded-full transition-all"
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
-                <div className="text-white text-xs font-mono text-center">
-                  {progressPct.toFixed(0)}% · {analysisProgress} / {totalFrames} frames
-                </div>
-              </div>
-            )}
-
-            {!webcam.isReady && !uploadedVideo && (
-              <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
-                {mode === 'camera' ? 'Camera not started' : 'No video uploaded'}
-              </div>
-            )}
+        {/* Tips — collapsible */}
+        {showTips && (
+          <div className="bg-slate-800 rounded-lg p-3 text-xs text-slate-300 space-y-2">
+            <p className="font-semibold text-white">📹 How to film:</p>
+            <ul className="space-y-1 list-none">
+              <li>✅ Camera side-on, perpendicular to bar path</li>
+              <li>✅ Bar end fully visible throughout the lift</li>
+              <li>✅ Camera stable — don't move it during the set</li>
+              <li>✅ Weight plate visible for auto-calibration</li>
+              <li>⚠️ Do not walk between the camera and bar</li>
+              <li>⚠️ If someone crosses the bar path, trim the video first</li>
+            </ul>
+            <p className="font-semibold text-white mt-2">🎯 Tracking tips:</p>
+            <ul className="space-y-1 list-none">
+              <li>👆 Tap precisely on the end of the bar sleeve</li>
+              <li>🔄 Re-tap if tracking is lost</li>
+              <li>💡 Good lighting improves plate calibration</li>
+            </ul>
           </div>
+        )}
+      </div>
 
-          {/* Tap hint below video */}
-          {hint && (
-            <div className={`w-full max-w-xl px-4 py-2.5 rounded-lg text-sm text-center ${hint.colour}`}>
-              {hint.text}
-            </div>
-          )}
-
-          {/* Camera controls */}
-          {mode === 'camera' && (
-            <div className="flex gap-3 flex-wrap justify-center">
-              <button
-                onClick={isTracking ? stopCamera : startCamera}
-                disabled={modelsLoading}
-                className={`px-6 py-2.5 rounded-lg font-semibold text-sm transition-colors
-                  ${isTracking
-                    ? 'bg-red-600 hover:bg-red-700'
-                    : 'bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed'
-                  }`}
-              >
-                {modelsLoading ? 'Loading...' : isTracking ? '⏹ Stop' : '▶ Start Camera'}
-              </button>
-
-              {isTracking && isSeeded && (
-                <button
-                  onClick={endSet}
-                  className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700 transition-colors"
-                >
-                  🏁 End Set
-                </button>
-              )}
-
-              <button
-                onClick={resetKinematics}
-                className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
-              >
-                🔄 Reset Set
-              </button>
-            </div>
-          )}
-
-          {/* Upload controls */}
-          {mode === 'upload' && (
-            <div className="flex flex-col items-center gap-3 w-full max-w-xl">
-              <label className="w-full cursor-pointer">
-                <div className="border-2 border-dashed border-slate-600 hover:border-blue-500
-                  rounded-xl p-6 text-center transition-colors">
-                  <div className="text-3xl mb-2">📹</div>
-                  <div className="text-sm text-slate-300 font-semibold">
-                    {uploadedVideo ? 'Click to change video' : 'Click to upload a video'}
-                  </div>
-                  <div className="text-xs text-slate-500 mt-1">MP4, MOV, WebM supported</div>
-                </div>
-                <input
-                  type="file"
-                  accept="video/*"
-                  className="hidden"
-                  onChange={handleFileUpload}
-                />
-              </label>
-
-              {/* Analyse / stop / reset */}
-              {uploadedVideo && (
-                <div className="flex gap-3">
-                  {analysisState === 'analysing' ? (
-                    <button
-                      onClick={stopAnalysis}
-                      className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-red-600 hover:bg-red-700"
-                    >
-                      ⏹ Stop
-                    </button>
-                  ) : (
-                    <button
-                      onClick={analyseVideoFrameByFrame}
-                      disabled={!videoReady || modelsLoading || !isSeeded}
-                      className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {!videoReady
-                        ? 'Loading video...'
-                        : modelsLoading
-                        ? 'Loading models...'
-                        : !isSeeded
-                        ? 'Tap bar first'
-                        : '▶ Analyse Video'}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      resetAll();
-                      trackerRef.current.reset();
-                      setAnalysisState('idle');
-                      setAnalysisProgress(0);
-                      setIsSeeded(false);
-                      lastPointRef.current = null;
-                    }}
-                    disabled={analysisState === 'analysing'}
-                    className="px-6 py-2.5 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600 disabled:opacity-50"
-                  >
-                    🔄 Reset
-                  </button>
-                </div>
-              )}
-
-              {uploadedVideo && analysisState === 'idle' && (
-                <p className="text-xs text-slate-500 text-center">
-                  Seek-based · 30fps · deterministic results every run
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Live stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full max-w-xl">
-            <StatCard
-              label="Velocity"
-              value={kinematics.pixelsPerMetre ? `${kinematics.velocity.toFixed(2)} m/s` : '-- m/s'}
-              highlight={kinematics.velocity > 0.5}
-            />
-            <StatCard
-              label="Peak"
-              value={kinematics.pixelsPerMetre ? `${kinematics.peakVelocity.toFixed(2)} m/s` : '-- m/s'}
-            />
-            <StatCard label="Reps" value={kinematics.repCount.toString()} large />
-            <StatCard label="Phase" value={kinematics.phase.toUpperCase()} />
+      {/* Live rep history */}
+      {kinematics.repHistory.length > 0 && (
+        <div className="mx-3 mb-3 bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+          <div className="px-3 py-2 border-b border-slate-700">
+            <h2 className="text-xs font-semibold text-slate-300">Rep History</h2>
           </div>
-
-          {/* Live rep history */}
-          {kinematics.repHistory.length > 0 && (
-            <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
-              <div className="px-4 py-3 border-b border-slate-700">
-                <h2 className="text-sm font-semibold text-slate-300">Rep History</h2>
-              </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-slate-400 text-xs border-b border-slate-700">
-                    <th className="px-4 py-2 text-left">Rep</th>
-                    <th className="px-4 py-2 text-right">Con. Avg</th>
-                    <th className="px-4 py-2 text-right">Peak</th>
-                    <th className="px-4 py-2 text-right">Ecc. Avg</th>
-                    <th className="px-4 py-2 text-right">Distance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {kinematics.repHistory.map((rep) => (
-                    <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
-                      <td className="px-4 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
-                      <td className={`px-4 py-2 font-mono text-right font-bold
-                        ${rep.concentricVelocity > 0.5 ? 'text-green-400'
-                        : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
-                        : 'text-red-400'}`}>
-                        {rep.concentricVelocity.toFixed(2)} m/s
-                      </td>
-                      <td className="px-4 py-2 font-mono text-right text-blue-400">
-                        {rep.peakVelocity.toFixed(2)} m/s
-                      </td>
-                      <td className="px-4 py-2 font-mono text-right text-slate-400">
-                        {rep.eccentricVelocity > 0
-                          ? `${rep.eccentricVelocity.toFixed(2)} m/s`
-                          : '--'}
-                      </td>
-                      <td className="px-4 py-2 font-mono text-right text-slate-400">
-                        {(rep.concentricDistance * 100).toFixed(0)}cm
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-slate-400 border-b border-slate-700">
+                <th className="px-3 py-1.5 text-left">Rep</th>
+                <th className="px-3 py-1.5 text-right">Avg</th>
+                <th className="px-3 py-1.5 text-right">Peak</th>
+                <th className="px-3 py-1.5 text-right">Ecc</th>
+                <th className="px-3 py-1.5 text-right">Dist</th>
+              </tr>
+            </thead>
+            <tbody>
+              {kinematics.repHistory.map((rep) => (
+                <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
+                  <td className="px-3 py-1.5 font-mono text-slate-300">#{rep.repNumber}</td>
+                  <td className={`px-3 py-1.5 font-mono text-right font-bold
+                    ${rep.concentricVelocity > 0.5 ? 'text-green-400'
+                    : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
+                    : 'text-red-400'}`}>
+                    {rep.concentricVelocity.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-right text-blue-400">
+                    {rep.peakVelocity.toFixed(2)}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-right text-slate-400">
+                    {rep.eccentricVelocity > 0 ? rep.eccentricVelocity.toFixed(2) : '--'}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-right text-slate-400">
+                    {(rep.concentricDistance * 100).toFixed(0)}cm
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {(webcam.error || plateDetector.error) && (
-        <div className="text-red-400 text-sm bg-red-950 px-4 py-2 rounded-lg">
+        <div className="mx-3 mb-3 text-red-400 text-xs bg-red-950 px-3 py-2 rounded-lg">
           {webcam.error || plateDetector.error}
         </div>
       )}
@@ -862,27 +850,45 @@ export default function BarbellTracker() {
   );
 }
 
-function StatusBadge({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function StatusDot({ ok, label }: { ok: boolean; label: string }) {
   return (
-    <div className={`px-3 py-1 rounded-full text-xs font-mono border
-      ${ok ? 'border-green-700 text-green-400' : 'border-slate-600 text-slate-400'}`}>
-      {label}: <span className="font-bold">{value}</span>
+    <div className={`flex items-center gap-1 text-xs font-mono
+      ${ok ? 'text-green-400' : 'text-slate-500'}`}>
+      <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-400' : 'bg-slate-600'}`} />
+      {label}
     </div>
   );
 }
 
-function StatCard({
-  label, value, highlight = false, large = false,
+function MiniStat({
+  label, value, unit, highlight, large
 }: {
-  label: string; value: string; highlight?: boolean; large?: boolean;
+  label: string; value: string; unit?: string; highlight?: boolean; large?: boolean;
+}) {
+  return (
+    <div className="bg-slate-900 border border-slate-700 rounded-lg p-2 text-center">
+      <div className="text-slate-500 text-xs leading-none mb-1">{label}</div>
+      <div className={`font-bold font-mono leading-none ${large ? 'text-2xl' : 'text-base'}
+        ${highlight ? 'text-green-400' : 'text-white'}`}>
+        {value}
+      </div>
+      {unit && <div className="text-slate-500 text-xs leading-none mt-0.5">{unit}</div>}
+    </div>
+  );
+}
+
+function SummaryCard({
+  label, value, sub, colour
+}: {
+  label: string; value: string; sub?: string; colour: string;
 }) {
   return (
     <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-center">
       <div className="text-slate-400 text-xs mb-1">{label}</div>
-      <div className={`font-bold font-mono ${large ? 'text-3xl' : 'text-lg'}
-        ${highlight ? 'text-green-400' : 'text-white'}`}>
-        {value}
-      </div>
+      <div className={`font-bold font-mono text-lg ${colour}`}>{value}</div>
+      {sub && <div className="text-slate-500 text-xs mt-0.5">{sub}</div>}
     </div>
   );
 }
