@@ -815,13 +815,25 @@ export default function BarbellTracker() {
               </div>
               <div className="flex gap-3 w-full">
                 <button
-                  onClick={() => { startPlayback(); }}
+                  onClick={() => {
+                    console.log('Play back clicked');
+                    console.log('trackedPath length:', trackedPathRef.current.length);
+                    console.log('video:', videoRef.current);
+                    console.log('completedReps:', completedReps.length);
+                    setPostAnalysisView('playback');
+                    setTimeout(() => startPlayback(), 100);
+                  }}
                   className="flex-1 py-3 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
                 >
                   ▶ Play Back
                 </button>
                 <button
-                  onClick={() => setPostAnalysisView('results')}
+                  onClick={() => {
+                    console.log('View results clicked');
+                    console.log('completedReps:', completedReps.length);
+                    console.log('postAnalysisView before:', postAnalysisView);
+                    setPostAnalysisView('results');
+                  }}
                   className="flex-1 py-3 rounded-lg font-semibold text-sm bg-green-600 hover:bg-green-700"
                 >
                   📊 View Results
