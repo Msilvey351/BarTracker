@@ -36,9 +36,10 @@ export default function BarbellTracker() {
   const trackInFlightRef = useRef(false);
   const lastPointRef     = useRef<{ x: number; y: number; tracked: boolean } | null>(null);
   const analysisAbortRef = useRef(false);
+  const trackedPathRef   = useRef<Array<{ x: number; y: number; timestamp: number }>>([]);
 
-  // Stores full tracked path for playback
-  const trackedPathRef = useRef<Array<{ x: number; y: number; timestamp: number }>>([]);
+  // Save seed point separately so resetAll() can't lose it
+  const seedPointRef = useRef<{ x: number; y: number } | null>(null);
 
   const webcam        = useWebcam(videoRef);
   const tracker       = useTracker();
@@ -53,22 +54,22 @@ export default function BarbellTracker() {
     setCalibration,
   } = useKinematics();
 
-  const [mode, setMode]                           = useState<Mode>('camera');
-  const [isTracking, setIsTracking]               = useState(false);
-  const [fps, setFps]                             = useState(0);
-  const [uploadedVideo, setUploadedVideo]         = useState<string | null>(null);
-  const [videoReady, setVideoReady]               = useState(false);
-  const [completedReps, setCompletedReps]         = useState<RepStats[]>([]);
-  const [manualCal, setManualCal]                 = useState<string>('');
-  const [analysisState, setAnalysisState]         = useState<AnalysisState>('idle');
-  const [analysisProgress, setAnalysisProgress]   = useState(0);
-  const [totalFrames, setTotalFrames]             = useState(0);
-  const [isSeeded, setIsSeeded]                   = useState(false);
-  const [showTips, setShowTips]                   = useState(false);
-  const [showCalInput, setShowCalInput]           = useState(false);
-  const [currentSampleFps, setCurrentSampleFps]   = useState(0);
-  const [postAnalysisView, setPostAnalysisView]   = useState<PostAnalysisView>('choice');
-  const [isPlayingBack, setIsPlayingBack]         = useState(false);
+  const [mode, setMode]                         = useState<Mode>('camera');
+  const [isTracking, setIsTracking]             = useState(false);
+  const [fps, setFps]                           = useState(0);
+  const [uploadedVideo, setUploadedVideo]       = useState<string | null>(null);
+  const [videoReady, setVideoReady]             = useState(false);
+  const [completedReps, setCompletedReps]       = useState<RepStats[]>([]);
+  const [manualCal, setManualCal]               = useState<string>('');
+  const [analysisState, setAnalysisState]       = useState<AnalysisState>('idle');
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [totalFrames, setTotalFrames]           = useState(0);
+  const [isSeeded, setIsSeeded]                 = useState(false);
+  const [showTips, setShowTips]                 = useState(false);
+  const [showCalInput, setShowCalInput]         = useState(false);
+  const [currentSampleFps, setCurrentSampleFps] = useState(0);
+  const [postAnalysisView, setPostAnalysisView] = useState<PostAnalysisView>('choice');
+  const [isPlayingBack, setIsPlayingBack]       = useState(false);
 
   const fpsRef = useRef({ frames: 0, last: performance.now() });
 
@@ -98,9 +99,7 @@ export default function BarbellTracker() {
     cancelAnimationFrame(animFrameRef.current);
     setIsTracking(false);
     const reps = kinematicsRef.current.repHistory;
-    if (reps.length > 0) {
-      setCompletedReps(reps);
-    }
+    if (reps.length > 0) setCompletedReps(reps);
   }, []);
 
   // ── Display offset ────────────────────────────────────────────────────────
@@ -132,11 +131,9 @@ export default function BarbellTracker() {
     return ctx.getImageData(0, 0, offscreen.width, offscreen.height);
   }, []);
 
-  // ── Capture scaled frame for optical flow ─────────────────────────────────
+  // ── Capture scaled frame ──────────────────────────────────────────────────
   const captureScaledFrame = useCallback((): {
-    imageData: ImageData;
-    scaleX: number;
-    scaleY: number;
+    imageData: ImageData; scaleX: number; scaleY: number;
   } | null => {
     const video     = videoRef.current;
     const offscreen = offscreenCanvasRef.current;
@@ -156,21 +153,15 @@ export default function BarbellTracker() {
     };
   }, []);
 
-  // ── Render overlay ────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
   const render = useCallback(() => {
     const overlay = overlayCanvasRef.current;
     if (!overlay) return;
     const { scale, offsetX, offsetY } = getDisplayOffset();
     renderFrame(
-      overlay,
-      overlay.clientWidth,
-      overlay.clientHeight,
-      lastPointRef.current,
-      kinematicsRef.current,
-      DEFAULT_RENDER_OPTIONS,
-      scale,
-      offsetX,
-      offsetY,
+      overlay, overlay.clientWidth, overlay.clientHeight,
+      lastPointRef.current, kinematicsRef.current,
+      DEFAULT_RENDER_OPTIONS, scale, offsetX, offsetY,
     );
   }, [getDisplayOffset]);
 
@@ -210,7 +201,9 @@ export default function BarbellTracker() {
       clampedX / scaled.scaleX,
       clampedY / scaled.scaleY
     );
+
     lastPointRef.current = { x: clampedX, y: clampedY, tracked: true };
+    seedPointRef.current = { x: clampedX, y: clampedY }; // ← save separately
     setIsSeeded(true);
   }, [mode, isTracking, videoReady, analysisState, postAnalysisView, getDisplayOffset, captureScaledFrame]);
 
@@ -232,10 +225,8 @@ export default function BarbellTracker() {
               const fullY = result.y * scaled.scaleY;
               lastPointRef.current = { x: fullX, y: fullY, tracked: true };
               updateKinematicsRef.current([{
-                x: fullX - 5, y: fullY - 5,
-                width: 10, height: 10,
-                centerX: fullX, centerY: fullY,
-                score: 1.0, label: 0,
+                x: fullX - 5, y: fullY - 5, width: 10, height: 10,
+                centerX: fullX, centerY: fullY, score: 1.0, label: 0,
               }]);
             } else {
               lastPointRef.current = { x: 0, y: 0, tracked: false };
@@ -305,7 +296,8 @@ export default function BarbellTracker() {
     setIsSeeded(false);
     setPostAnalysisView('choice');
     setIsPlayingBack(false);
-    lastPointRef.current = null;
+    lastPointRef.current  = null;
+    seedPointRef.current  = null;
     trackedPathRef.current = [];
     resetAll();
     trackerRef.current.reset();
@@ -326,14 +318,26 @@ export default function BarbellTracker() {
     });
   }, []);
 
-  // ── Seek-based deterministic analysis ─────────────────────────────────────
+  // ── Analysis ──────────────────────────────────────────────────────────────
   const analyseVideoFrameByFrame = useCallback(async () => {
     const video = videoRef.current;
     if (!video || !isSeeded) return;
 
-    resetAll();
-    trackedPathRef.current = [];
+    // ── Save seed point BEFORE resetAll clears anything ───────────────────
+    const savedSeed = seedPointRef.current ?? lastPointRef.current;
+    if (!savedSeed) {
+      console.error('No seed point saved — cannot analyse');
+      return;
+    }
+
+    console.log('Analysis starting with seed:', savedSeed);
+
+    trackedPathRef.current  = [];
     analysisAbortRef.current = false;
+
+    // Reset kinematics but NOT the seed point
+    resetAll();
+
     setAnalysisState('analysing');
     setCompletedReps([]);
     setAnalysisProgress(0);
@@ -349,17 +353,24 @@ export default function BarbellTracker() {
     video.pause();
     await seekTo(video, 0);
 
+    // Seed tracker at frame 0 using saved seed point
     const firstScaled = captureScaledFrame();
-    if (firstScaled && lastPointRef.current) {
-      await trackerRef.current.seed(
-        firstScaled.imageData,
-        lastPointRef.current.x / firstScaled.scaleX,
-        lastPointRef.current.y / firstScaled.scaleY
-      );
+    if (firstScaled) {
+      const seedX = savedSeed.x / firstScaled.scaleX;
+      const seedY = savedSeed.y / firstScaled.scaleY;
+      console.log('Seeding tracker at:', seedX, seedY);
+      await trackerRef.current.seed(firstScaled.imageData, seedX, seedY);
+      // Restore lastPointRef after seeding
+      lastPointRef.current = { x: savedSeed.x, y: savedSeed.y, tracked: true };
+    } else {
+      console.error('Could not capture first frame');
+      setAnalysisState('idle');
+      return;
     }
 
     let frameIndex           = 0;
     let calibrationAttempted = kinematicsRef.current.calibrationLocked;
+    let trackedCount         = 0;
 
     while (!analysisAbortRef.current) {
       const targetTime = frameIndex * frameTime;
@@ -379,32 +390,26 @@ export default function BarbellTracker() {
             if (plateResult.length > 0) {
               updateCalibrationRef.current(plateResult);
               calibrationAttempted = true;
+              console.log('Calibration set at frame', frameIndex);
             }
           }
           if (targetTime > 3) calibrationAttempted = true;
         }
 
-        // Track
         const result = await trackerRef.current.track(scaled.imageData, targetTime * 1000);
 
         if (result.tracked) {
+          trackedCount++;
           const fullX = result.x * scaled.scaleX;
           const fullY = result.y * scaled.scaleY;
 
           lastPointRef.current = { x: fullX, y: fullY, tracked: true };
 
-          // Store for playback
-          trackedPathRef.current.push({
-            x: fullX,
-            y: fullY,
-            timestamp: targetTime * 1000,
-          });
+          trackedPathRef.current.push({ x: fullX, y: fullY, timestamp: targetTime * 1000 });
 
           updateWithTimestampRef.current([{
-            x: fullX - 5, y: fullY - 5,
-            width: 10, height: 10,
-            centerX: fullX, centerY: fullY,
-            score: 1.0, label: 0,
+            x: fullX - 5, y: fullY - 5, width: 10, height: 10,
+            centerX: fullX, centerY: fullY, score: 1.0, label: 0,
           }], targetTime * 1000);
         } else {
           lastPointRef.current = { x: 0, y: 0, tracked: false };
@@ -415,10 +420,18 @@ export default function BarbellTracker() {
       setAnalysisProgress(frameIndex);
     }
 
+    console.log('Analysis complete:');
+    console.log('  Frames processed:', frameIndex);
+    console.log('  Frames tracked:', trackedCount);
+    console.log('  trackedPath length:', trackedPathRef.current.length);
+    console.log('  repHistory:', kinematicsRef.current.repHistory.length);
+    console.log('  calibrationLocked:', kinematicsRef.current.calibrationLocked);
+    console.log('  pixelsPerMetre:', kinematicsRef.current.pixelsPerMetre);
+
     if (!analysisAbortRef.current) {
-      setAnalysisState('complete');
       const reps = kinematicsRef.current.repHistory;
       setCompletedReps(reps);
+      setAnalysisState('complete');
       setPostAnalysisView('choice');
     } else {
       setAnalysisState('idle');
@@ -434,13 +447,12 @@ export default function BarbellTracker() {
   // ── Playback ──────────────────────────────────────────────────────────────
   const startPlayback = useCallback(() => {
     const video = videoRef.current;
-    if (!video || trackedPathRef.current.length === 0) return;
+    if (!video || trackedPathRef.current.length === 0) {
+      console.warn('Cannot start playback — no path or no video');
+      return;
+    }
 
-    setPostAnalysisView('playback');
     setIsPlayingBack(true);
-
-    // Reset kinematics bar path for visual replay
-    // (don't reset reps/velocity — keep the results)
     lastPointRef.current = null;
 
     video.currentTime = 0;
@@ -455,37 +467,27 @@ export default function BarbellTracker() {
         setIsPlayingBack(false);
         return;
       }
-
       if (video.paused) {
         animFrameRef.current = requestAnimationFrame(playbackLoop);
         return;
       }
 
       const currentMs = video.currentTime * 1000;
-
-      // Advance to the correct path position for current video time
       while (pathIndex < path.length - 1 && path[pathIndex + 1].timestamp <= currentMs) {
         pathIndex++;
       }
 
       if (path[pathIndex]) {
-        const point = path[pathIndex];
-        lastPointRef.current = { x: point.x, y: point.y, tracked: true };
+        lastPointRef.current = { x: path[pathIndex].x, y: path[pathIndex].y, tracked: true };
         render();
       }
 
       animFrameRef.current = requestAnimationFrame(playbackLoop);
     };
 
-    // Reset path index
     pathIndex = 0;
     animFrameRef.current = requestAnimationFrame(playbackLoop);
-
-    // Clean up when video ends
-    video.addEventListener('ended', () => {
-      setIsPlayingBack(false);
-    }, { once: true });
-
+    video.addEventListener('ended', () => setIsPlayingBack(false), { once: true });
   }, [render]);
 
   const stopPlayback = useCallback(() => {
@@ -502,20 +504,21 @@ export default function BarbellTracker() {
     setIsSeeded(false);
     setPostAnalysisView('choice');
     setIsPlayingBack(false);
-    lastPointRef.current = null;
+    lastPointRef.current   = null;
+    seedPointRef.current   = null;
     trackedPathRef.current = [];
     resetKinematics();
     trackerRef.current.reset();
+    cancelAnimationFrame(animFrameRef.current);
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.currentTime = 0;
     }
-    cancelAnimationFrame(animFrameRef.current);
   }, [resetKinematics]);
 
   // ── Mode switching ────────────────────────────────────────────────────────
   const switchMode = useCallback((newMode: Mode) => {
-    isRunningRef.current = false;
+    isRunningRef.current    = false;
     analysisAbortRef.current = true;
     cancelAnimationFrame(animFrameRef.current);
     setIsTracking(false);
@@ -535,7 +538,8 @@ export default function BarbellTracker() {
     setIsSeeded(false);
     setPostAnalysisView('choice');
     setIsPlayingBack(false);
-    lastPointRef.current = null;
+    lastPointRef.current   = null;
+    seedPointRef.current   = null;
     trackedPathRef.current = [];
     plateInFlightRef.current = false;
     trackInFlightRef.current = false;
@@ -561,19 +565,15 @@ export default function BarbellTracker() {
 
   // ── Summary stats ─────────────────────────────────────────────────────────
   const avgSetVelocity = completedReps.length > 0
-    ? completedReps.reduce((s, r) => s + r.concentricVelocity, 0) / completedReps.length
-    : 0;
+    ? completedReps.reduce((s, r) => s + r.concentricVelocity, 0) / completedReps.length : 0;
   const bestRep = completedReps.length > 0
-    ? completedReps.reduce((a, b) => a.concentricVelocity > b.concentricVelocity ? a : b)
-    : null;
+    ? completedReps.reduce((a, b) => a.concentricVelocity > b.concentricVelocity ? a : b) : null;
   const velocityLoss = bestRep && completedReps.length > 1
     ? (() => {
         const worst = completedReps.reduce((a, b) =>
-          a.concentricVelocity < b.concentricVelocity ? a : b
-        );
+          a.concentricVelocity < b.concentricVelocity ? a : b);
         return (bestRep.concentricVelocity - worst.concentricVelocity) / bestRep.concentricVelocity * 100;
-      })()
-    : 0;
+      })() : 0;
 
   const trackerReady  = tracker.status === 'ready' || tracker.status === 'seeded' || tracker.status === 'lost';
   const plateReady    = plateDetector.status === 'ready';
@@ -595,91 +595,99 @@ export default function BarbellTracker() {
   const hint = tapHintText();
 
   // ── Results screen ────────────────────────────────────────────────────────
-  if (postAnalysisView === 'results' && completedReps.length > 0) {
+  if (postAnalysisView === 'results') {
     return (
       <div className="flex flex-col items-center gap-4 p-4 bg-slate-950 min-h-screen text-white">
         <h1 className="text-xl font-bold">🏋️ Barbell Tracker</h1>
 
-        <div className="text-center">
-          <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
-          <div className="text-slate-400 text-sm">
-            {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
-            {kinematics.calibrationLocked && (
-              <span className="ml-2 text-slate-500">
-                · CAL {kinematics.pixelsPerMetre!.toFixed(0)} px/m
-              </span>
-            )}
+        {completedReps.length === 0 ? (
+          <div className="text-center text-slate-400 mt-8">
+            <div className="text-4xl mb-4">📊</div>
+            <div>No reps detected in this set.</div>
+            <div className="text-sm mt-2">Try adjusting your tap point or check calibration.</div>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-400 mb-1">✅ Set Complete</div>
+              <div className="text-slate-400 text-sm">
+                {completedReps.length} rep{completedReps.length !== 1 ? 's' : ''}
+                {kinematics.calibrationLocked && (
+                  <span className="ml-2 text-slate-500">
+                    · CAL {kinematics.pixelsPerMetre!.toFixed(0)} px/m
+                  </span>
+                )}
+              </div>
+            </div>
 
-        <div className="grid grid-cols-3 gap-3 w-full max-w-xl">
-          <SummaryCard
-            label="Avg Velocity"
-            value={`${avgSetVelocity.toFixed(2)} m/s`}
-            colour={avgSetVelocity > 0.5 ? 'text-green-400' : avgSetVelocity > 0.3 ? 'text-yellow-400' : 'text-red-400'}
-          />
-          <SummaryCard
-            label="Best Rep"
-            value={bestRep ? `${bestRep.concentricVelocity.toFixed(2)} m/s` : '--'}
-            sub={bestRep ? `Rep #${bestRep.repNumber}` : ''}
-            colour="text-green-400"
-          />
-          <SummaryCard
-            label="Vel. Loss"
-            value={`${velocityLoss.toFixed(0)}%`}
-            colour={velocityLoss < 10 ? 'text-green-400' : velocityLoss < 20 ? 'text-yellow-400' : 'text-red-400'}
-          />
-        </div>
+            <div className="grid grid-cols-3 gap-3 w-full max-w-xl">
+              <SummaryCard
+                label="Avg Velocity"
+                value={`${avgSetVelocity.toFixed(2)} m/s`}
+                colour={avgSetVelocity > 0.5 ? 'text-green-400' : avgSetVelocity > 0.3 ? 'text-yellow-400' : 'text-red-400'}
+              />
+              <SummaryCard
+                label="Best Rep"
+                value={bestRep ? `${bestRep.concentricVelocity.toFixed(2)} m/s` : '--'}
+                sub={bestRep ? `Rep #${bestRep.repNumber}` : ''}
+                colour="text-green-400"
+              />
+              <SummaryCard
+                label="Vel. Loss"
+                value={`${velocityLoss.toFixed(0)}%`}
+                colour={velocityLoss < 10 ? 'text-green-400' : velocityLoss < 20 ? 'text-yellow-400' : 'text-red-400'}
+              />
+            </div>
 
-        <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700">
-            <h2 className="text-sm font-semibold text-slate-300">Rep Breakdown</h2>
-          </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-400 text-xs border-b border-slate-700">
-                <th className="px-3 py-2 text-left">Rep</th>
-                <th className="px-3 py-2 text-right">Avg</th>
-                <th className="px-3 py-2 text-right">Peak</th>
-                <th className="px-3 py-2 text-right">Dist</th>
-                <th className="px-3 py-2 text-right">vs Best</th>
-              </tr>
-            </thead>
-            <tbody>
-              {completedReps.map((rep) => {
-                const drop = bestRep
-                  ? (bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100
-                  : 0;
-                return (
-                  <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
-                    <td className="px-3 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
-                    <td className={`px-3 py-2 font-mono text-right font-bold
-                      ${rep.concentricVelocity > 0.5 ? 'text-green-400'
-                      : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
-                      : 'text-red-400'}`}>
-                      {rep.concentricVelocity.toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-right text-blue-400">
-                      {rep.peakVelocity.toFixed(2)}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-right text-slate-400">
-                      {(rep.concentricDistance * 100).toFixed(0)}cm
-                    </td>
-                    <td className={`px-3 py-2 font-mono text-right text-xs
-                      ${drop < 5 ? 'text-green-400' : drop < 15 ? 'text-yellow-400' : 'text-red-400'}`}>
-                      {drop < 1 ? '🏆' : `-${drop.toFixed(0)}%`}
-                    </td>
+            <div className="w-full max-w-xl bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-700">
+                <h2 className="text-sm font-semibold text-slate-300">Rep Breakdown</h2>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-400 text-xs border-b border-slate-700">
+                    <th className="px-3 py-2 text-left">Rep</th>
+                    <th className="px-3 py-2 text-right">Avg</th>
+                    <th className="px-3 py-2 text-right">Peak</th>
+                    <th className="px-3 py-2 text-right">Dist</th>
+                    <th className="px-3 py-2 text-right">vs Best</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {completedReps.map((rep) => {
+                    const drop = bestRep
+                      ? (bestRep.concentricVelocity - rep.concentricVelocity) / bestRep.concentricVelocity * 100 : 0;
+                    return (
+                      <tr key={rep.repNumber} className="border-b border-slate-800 last:border-0">
+                        <td className="px-3 py-2 font-mono text-slate-300">#{rep.repNumber}</td>
+                        <td className={`px-3 py-2 font-mono text-right font-bold
+                          ${rep.concentricVelocity > 0.5 ? 'text-green-400'
+                          : rep.concentricVelocity > 0.3 ? 'text-yellow-400' : 'text-red-400'}`}>
+                          {rep.concentricVelocity.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-right text-blue-400">
+                          {rep.peakVelocity.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-right text-slate-400">
+                          {(rep.concentricDistance * 100).toFixed(0)}cm
+                        </td>
+                        <td className={`px-3 py-2 font-mono text-right text-xs
+                          ${drop < 5 ? 'text-green-400' : drop < 15 ? 'text-yellow-400' : 'text-red-400'}`}>
+                          {drop < 1 ? '🏆' : `-${drop.toFixed(0)}%`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
 
         <div className="flex gap-3 w-full max-w-xl">
           {trackedPathRef.current.length > 0 && (
             <button
-              onClick={() => { setPostAnalysisView('playback'); startPlayback(); }}
+              onClick={() => { setPostAnalysisView('playback'); setTimeout(() => startPlayback(), 50); }}
               className="flex-1 py-3 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
             >
               ▶ Play Back
@@ -704,19 +712,18 @@ export default function BarbellTracker() {
       <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
         <h1 className="text-base font-bold">🏋️ Barbell Tracker</h1>
         <div className="flex items-center gap-2 text-xs">
-          <StatusDot ok={trackerReady}  label={`T:${tracker.status.slice(0,4)}`} />
-          <StatusDot ok={plateReady}    label={`P:${plateDetector.status.slice(0,4)}`} />
-          <StatusDot ok={fps > 5}       label={`${fps}fps`} />
+          <StatusDot ok={trackerReady} label={`T:${tracker.status.slice(0,4)}`} />
+          <StatusDot ok={plateReady}   label={`P:${plateDetector.status.slice(0,4)}`} />
+          <StatusDot ok={fps > 5}      label={`${fps}fps`} />
           <StatusDot
             ok={!!kinematics.calibrationLocked}
             label={kinematics.calibrationLocked
-              ? `${kinematics.pixelsPerMetre!.toFixed(0)}px/m`
-              : 'NO CAL'}
+              ? `${kinematics.pixelsPerMetre!.toFixed(0)}px/m` : 'NO CAL'}
           />
         </div>
       </div>
 
-      {/* Mode toggle — hide during analysis and playback */}
+      {/* Mode toggle */}
       {analysisState !== 'analysing' && postAnalysisView !== 'playback' && (
         <div className="flex bg-slate-900 border-b border-slate-800">
           <button
@@ -736,7 +743,7 @@ export default function BarbellTracker() {
         </div>
       )}
 
-      {/* ── Analysis progress screen ── */}
+      {/* Analysis progress */}
       {analysisState === 'analysing' ? (
         <div className="flex flex-col items-center justify-center flex-1 gap-6 p-8"
           style={{ minHeight: '60vh' }}>
@@ -768,7 +775,7 @@ export default function BarbellTracker() {
 
       ) : (
         <>
-          {/* ── Video area ── */}
+          {/* Video area */}
           <div
             className="relative bg-black w-full cursor-crosshair"
             style={{ minHeight: '50vh', maxHeight: '65vh' }}
@@ -792,7 +799,6 @@ export default function BarbellTracker() {
               className="absolute inset-0 w-full h-full"
               style={{ pointerEvents: 'none' }}
             />
-
             {!webcam.isReady && !uploadedVideo && (
               <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
                 {mode === 'camera' ? 'Tap Start Camera below' : 'Upload a video below'}
@@ -807,7 +813,7 @@ export default function BarbellTracker() {
             </div>
           )}
 
-          {/* ── Post-analysis choice screen ── */}
+          {/* Post-analysis choice */}
           {analysisState === 'complete' && postAnalysisView === 'choice' && (
             <div className="flex flex-col items-center gap-3 px-3 py-4">
               <div className="text-green-400 font-semibold text-center">
@@ -816,24 +822,15 @@ export default function BarbellTracker() {
               <div className="flex gap-3 w-full">
                 <button
                   onClick={() => {
-                    console.log('Play back clicked');
-                    console.log('trackedPath length:', trackedPathRef.current.length);
-                    console.log('video:', videoRef.current);
-                    console.log('completedReps:', completedReps.length);
                     setPostAnalysisView('playback');
-                    setTimeout(() => startPlayback(), 100);
+                    setTimeout(() => startPlayback(), 50);
                   }}
                   className="flex-1 py-3 rounded-lg font-semibold text-sm bg-slate-700 hover:bg-slate-600"
                 >
                   ▶ Play Back
                 </button>
                 <button
-                  onClick={() => {
-                    console.log('View results clicked');
-                    console.log('completedReps:', completedReps.length);
-                    console.log('postAnalysisView before:', postAnalysisView);
-                    setPostAnalysisView('results');
-                  }}
+                  onClick={() => setPostAnalysisView('results')}
                   className="flex-1 py-3 rounded-lg font-semibold text-sm bg-green-600 hover:bg-green-700"
                 >
                   📊 View Results
@@ -848,7 +845,7 @@ export default function BarbellTracker() {
             </div>
           )}
 
-          {/* ── Playback controls ── */}
+          {/* Playback controls */}
           {postAnalysisView === 'playback' && (
             <div className="flex flex-col gap-2 px-3 py-3">
               <div className="flex gap-2">
@@ -860,32 +857,23 @@ export default function BarbellTracker() {
                   {isPlayingBack ? '⏸ Pause' : '▶ Play'}
                 </button>
                 <button
-                  onClick={() => {
-                    stopPlayback();
-                    setPostAnalysisView('results');
-                  }}
+                  onClick={() => { stopPlayback(); setPostAnalysisView('results'); }}
                   className="flex-1 py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700"
                 >
                   📊 Results
                 </button>
                 <button
-                  onClick={() => {
-                    stopPlayback();
-                    setPostAnalysisView('choice');
-                  }}
+                  onClick={() => { stopPlayback(); setPostAnalysisView('choice'); }}
                   className="px-4 py-3 rounded-lg text-sm bg-slate-700 hover:bg-slate-600"
                 >
                   ✕
                 </button>
               </div>
-
-              {/* Live stats during playback */}
               <div className="grid grid-cols-4 gap-2">
                 <MiniStat
                   label="Velocity"
                   value={kinematics.pixelsPerMetre ? `${kinematics.velocity.toFixed(2)}` : '--'}
-                  unit="m/s"
-                  highlight={kinematics.velocity > 0.5}
+                  unit="m/s" highlight={kinematics.velocity > 0.5}
                 />
                 <MiniStat
                   label="Peak"
@@ -898,11 +886,11 @@ export default function BarbellTracker() {
             </div>
           )}
 
-          {/* ── Normal camera/upload controls ── */}
+          {/* Normal controls */}
           {postAnalysisView === 'choice' && analysisState !== 'complete' && (
             <div className="flex flex-col gap-2 px-3 py-3">
 
-              {/* Camera controls */}
+              {/* Camera */}
               {mode === 'camera' && (
                 <div className="flex gap-2">
                   <button
@@ -917,23 +905,19 @@ export default function BarbellTracker() {
                     {modelsLoading ? 'Loading...' : isTracking ? '⏹ Stop' : '▶ Start Camera'}
                   </button>
                   {isTracking && isSeeded && (
-                    <button
-                      onClick={endSet}
-                      className="flex-1 py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700"
-                    >
+                    <button onClick={endSet}
+                      className="flex-1 py-3 rounded-lg font-semibold text-sm bg-blue-600 hover:bg-blue-700">
                       🏁 End Set
                     </button>
                   )}
-                  <button
-                    onClick={resetKinematics}
-                    className="px-4 py-3 rounded-lg text-sm bg-slate-700 hover:bg-slate-600"
-                  >
+                  <button onClick={resetKinematics}
+                    className="px-4 py-3 rounded-lg text-sm bg-slate-700 hover:bg-slate-600">
                     🔄
                   </button>
                 </div>
               )}
 
-              {/* Upload controls */}
+              {/* Upload */}
               {mode === 'upload' && (
                 <>
                   <label className="cursor-pointer">
@@ -953,10 +937,8 @@ export default function BarbellTracker() {
                         disabled={!videoReady || modelsLoading || !isSeeded}
                         className="flex-1 py-3 rounded-lg font-semibold text-sm bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed"
                       >
-                        {!videoReady ? 'Loading...'
-                          : modelsLoading ? 'Loading...'
-                          : !isSeeded ? 'Tap bar first'
-                          : '▶ Analyse'}
+                        {!videoReady ? 'Loading...' : modelsLoading ? 'Loading...'
+                          : !isSeeded ? 'Tap bar first' : '▶ Analyse'}
                       </button>
                       <button
                         onClick={() => {
@@ -966,7 +948,8 @@ export default function BarbellTracker() {
                           setAnalysisProgress(0);
                           setIsSeeded(false);
                           setPostAnalysisView('choice');
-                          lastPointRef.current = null;
+                          lastPointRef.current  = null;
+                          seedPointRef.current  = null;
                           trackedPathRef.current = [];
                         }}
                         className="px-4 py-3 rounded-lg text-sm bg-slate-700 hover:bg-slate-600"
@@ -978,13 +961,12 @@ export default function BarbellTracker() {
                 </>
               )}
 
-              {/* Live stats */}
+              {/* Stats */}
               <div className="grid grid-cols-4 gap-2">
                 <MiniStat
                   label="Velocity"
                   value={kinematics.pixelsPerMetre ? `${kinematics.velocity.toFixed(2)}` : '--'}
-                  unit="m/s"
-                  highlight={kinematics.velocity > 0.5}
+                  unit="m/s" highlight={kinematics.velocity > 0.5}
                 />
                 <MiniStat
                   label="Peak"
@@ -1013,7 +995,6 @@ export default function BarbellTracker() {
                 </button>
               </div>
 
-              {/* Calibration input */}
               {showCalInput && (
                 <div className="flex gap-2 items-center bg-slate-800 rounded-lg px-3 py-2">
                   <span className="text-xs text-slate-400 shrink-0">px/m:</span>
@@ -1024,24 +1005,19 @@ export default function BarbellTracker() {
                     placeholder="e.g. 400"
                     className="flex-1 bg-transparent text-white text-sm font-mono outline-none"
                   />
-                  <button
-                    onClick={applyManualCal}
-                    className="px-3 py-1 rounded bg-blue-600 text-xs font-semibold"
-                  >
+                  <button onClick={applyManualCal}
+                    className="px-3 py-1 rounded bg-blue-600 text-xs font-semibold">
                     Apply
                   </button>
                   {kinematics.calibrationLocked && (
-                    <button
-                      onClick={() => { resetAll(); setShowCalInput(false); }}
-                      className="px-3 py-1 rounded bg-slate-600 text-xs text-orange-400"
-                    >
+                    <button onClick={() => { resetAll(); setShowCalInput(false); }}
+                      className="px-3 py-1 rounded bg-slate-600 text-xs text-orange-400">
                       🔓
                     </button>
                   )}
                 </div>
               )}
 
-              {/* Tips */}
               {showTips && (
                 <div className="bg-slate-800 rounded-lg p-3 text-xs text-slate-300 space-y-2">
                   <p className="font-semibold text-white">📹 How to film:</p>
@@ -1058,12 +1034,14 @@ export default function BarbellTracker() {
                     <li>👆 Tap precisely on the end of the bar sleeve</li>
                     <li>🔄 Re-tap if tracking is lost</li>
                     <li>💡 Good lighting improves plate calibration</li>
-                    <li>📏 Runs at {currentSampleFps > 0 ? `${currentSampleFps}fps` : `${isMobile ? '10–15' : '20–30'}fps`}</li>
+                    <li>📏 Runs at {currentSampleFps > 0
+                      ? `${currentSampleFps}fps`
+                      : `${isMobile ? '10–15' : '20–30'}fps`}
+                    </li>
                   </ul>
                 </div>
               )}
 
-              {/* Live rep history */}
               {kinematics.repHistory.length > 0 && (
                 <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
                   <div className="px-3 py-2 border-b border-slate-700">
@@ -1085,8 +1063,7 @@ export default function BarbellTracker() {
                           <td className="px-3 py-1.5 font-mono text-slate-300">#{rep.repNumber}</td>
                           <td className={`px-3 py-1.5 font-mono text-right font-bold
                             ${rep.concentricVelocity > 0.5 ? 'text-green-400'
-                            : rep.concentricVelocity > 0.3 ? 'text-yellow-400'
-                            : 'text-red-400'}`}>
+                            : rep.concentricVelocity > 0.3 ? 'text-yellow-400' : 'text-red-400'}`}>
                             {rep.concentricVelocity.toFixed(2)}
                           </td>
                           <td className="px-3 py-1.5 font-mono text-right text-blue-400">
@@ -1117,8 +1094,6 @@ export default function BarbellTracker() {
     </div>
   );
 }
-
-// ── Sub-components ────────────────────────────────────────────────────────────
 
 function StatusDot({ ok, label }: { ok: boolean; label: string }) {
   return (
